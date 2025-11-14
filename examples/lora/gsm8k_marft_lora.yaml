@@ -1,39 +1,46 @@
-experiment_name: gsm8k-ppo
+experiment_name: gsm8k-ppo-lora-multiagent-joint
 trial_name: trial0
+
+# Multi-agent 特定配置
+n_agents: 2
+agent_interaction_mode: sequential  # 或 parallel, communication
 
 seed: 1
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-async_training: false
+async_training: false  # 改为同步，确保联合推理完成后再训练
 
 cluster:
   n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /tmp/areal/experiments
+  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/areal-marft/AReaL-MARFT/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/areal-marft/AReaL-MARFT/name_resolve
 
-allocation_mode: sglang:d4p1t1+d4p1t1
+# 所有 agents 共享同一套资源分配
+allocation_mode: sglang:d1p1t1+d1p1t1
 
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 256
+  max_concurrent_rollouts: 128  # 减半以容纳多 agent
   queue_size: null
-  consumer_batch_size: ${train_dataset.batch_size}
-  max_head_offpolicyness: 2
-  enable_rollout_tracing: false
+  consumer_batch_size: 128
+  max_head_offpolicyness: 4
+  enable_rollout_tracing: true  # 开启 tracing 用于调试
+  pause_grace_period: 1.0
 
 gconfig:
   n_samples: 1
   min_new_tokens: 0
-  max_new_tokens: 1024
+  max_new_tokens: 512
   greedy: false
   temperature: 1.0
 
+# Actor/Critic 配置作为模板，每个 agent 会复制
 actor:
-  experiment_name: ${experiment_name}
+  experiment_name: ${experiment_name}  # 运行时会添加 _agent{id}
   trial_name: ${trial_name}
   path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/models/Qwen2.5-1.5B-Instruct
   init_from_scratch: false
@@ -41,11 +48,11 @@ actor:
   gradient_checkpointing: false
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 10240
+    max_tokens_per_mb: 8192  # 降低以节省显存
   optimizer:
     type: adam
-    lr: 1.70e-5
-    weight_decay: 0.017
+    lr: 3e-5
+    weight_decay: 0.01
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
@@ -64,6 +71,11 @@ actor:
   behav_imp_weight_cap: 5.0
   dynamic_sampling: false
   max_new_tokens: ${gconfig.max_new_tokens}
+  use_lora: true
+  peft_type: lora
+  lora_rank: 32
+  lora_alpha: 16
+  target_modules: [all-linear]
 
 critic:
   is_critic: true
@@ -75,9 +87,8 @@ critic:
   dtype: ${actor.dtype}
   eps_clip: 0.5
   ppo_n_minibatches: ${actor.ppo_n_minibatches}
-  mask_no_eos_with_zero: ${actor.mask_no_eos_with_zero}
   mb_spec:
-    max_tokens_per_mb: 10240
+    max_tokens_per_mb: 8192
   optimizer: ${actor.optimizer}
 
 ref:
@@ -88,23 +99,26 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 10240
+    max_tokens_per_mb: 1024
   optimizer: null
 
-# SGLang
 sglang:
   model_path: ${actor.path}
   random_seed: ${seed}
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
-  max_running_requests: null
+  max_running_requests: 64  # 控制并发
   context_length: 32768
-  mem_fraction_static: 0.8
+  mem_fraction_static: 0.75  # 降低以容纳多 agent
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  lora_target_modules: ${actor.target_modules}
+  schedule_policy: fcfs
 
-# datasets
 train_dataset:
-  batch_size: 256
+  batch_size: 128  # 减半
   shuffle: true
+  drop_last: true
   pin_memory: true
   num_workers: 4
   path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/gsm8k
@@ -112,14 +126,13 @@ train_dataset:
   max_length: 1024
 
 valid_dataset:
-  batch_size: 256
+  batch_size: 128
   shuffle: true
   pin_memory: true
   num_workers: 4
   path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/gsm8k
   type: rl
 
-# Utilities
 saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -152,10 +165,10 @@ stats_logger:
   wandb:
     mode: disabled
   tensorboard:
-    path: ${cluster.fileroot}
+    path: ${cluster.fileroot}/${experiment_name}/${trial_name}
 
 launcher:
-  inference_server_cpus_per_gpu: 4
+  inference_server_cpus_per_gpu: 15
   inference_server_mem_per_gpu: 32768
-  trainer_cpus_per_gpu: 4
+  trainer_cpus_per_gpu: 15
   trainer_mem_per_gpu: 32768
