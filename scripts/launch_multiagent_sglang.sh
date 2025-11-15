@@ -7,9 +7,15 @@ set -e
 N_AGENTS=${1:-2}
 BASE_PORT=${2:-17987}
 MODEL_PATH=${MODEL_PATH:-"/path/to/your/base/model"}
-BASE_GPU_ID=${BASE_GPU_ID:-0}
+BASE_GPU_ID=${BASE_GPU_ID:-6}
 # ✅ 可选：控制显存占用（默认 0.9）
-MEM_FRACTION=${MEM_FRACTION:-0.85}
+MEM_FRACTION=${MEM_FRACTION:-0.9}
+# ✅ LoRA 配置（必须与训练时的配置一致）
+MAX_LORA_RANK=${MAX_LORA_RANK:-32}
+# SGLang accepts: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, qkv_proj, gate_up_proj, all
+# Use "all" to match "all-linear" behavior in training config
+# LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"all"}
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj v_proj"}
 
 echo "============================================"
 echo "Multi-Agent SGLang Launcher"
@@ -19,6 +25,8 @@ echo "BASE_PORT: ${BASE_PORT}"
 echo "MODEL_PATH: ${MODEL_PATH}"
 echo "BASE_GPU_ID: ${BASE_GPU_ID}"
 echo "MEM_FRACTION: ${MEM_FRACTION}"
+echo "MAX_LORA_RANK: ${MAX_LORA_RANK}"
+echo "LORA_TARGET_MODULES: ${LORA_TARGET_MODULES}"
 echo "============================================"
 
 # Check if model path exists
@@ -53,13 +61,20 @@ for agent_id in $(seq 0 $((N_AGENTS - 1))); do
     echo "   - GPU: ${GPU_ID}"
     echo "   - Log: ${LOG_FILE}"
     
-    # ✅ 最小化启动参数（移除 --enable-flashinfer 等有歧义的参数）
+    # ✅ 添加 --enable-lora 及必需的 LoRA 配置参数
     CUDA_VISIBLE_DEVICES=${GPU_ID} python -m sglang.launch_server \
         --model-path "${MODEL_PATH}" \
         --port ${PORT} \
         --host 0.0.0.0 \
         --trust-remote-code \
         --mem-fraction-static ${MEM_FRACTION} \
+        --enable-lora \
+        --max-loras-per-batch 1 \
+        --max-lora-rank ${MAX_LORA_RANK} \
+        --lora-target-modules ${LORA_TARGET_MODULES} \
+        --max-running-requests 64 \
+        --schedule-policy fcfs \
+        --skip-tokenizer-init \
         > "${LOG_FILE}" 2>&1 &
     
     SERVER_PID=$!

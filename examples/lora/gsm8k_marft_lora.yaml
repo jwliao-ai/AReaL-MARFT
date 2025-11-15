@@ -1,4 +1,4 @@
-experiment_name: gsm8k-ppo-lora-multiagent-joint
+experiment_name: gsm8k-marft-lora-duo-qwen25-15b
 trial_name: trial0
 
 # Multi-agent 特定配置
@@ -12,11 +12,11 @@ async_training: false  # 改为同步，确保联合推理完成后再训练
 
 cluster:
   n_nodes: 1
-  n_gpus_per_node: 8
-  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/areal-marft/AReaL-MARFT/experiments
+  n_gpus_per_node: 4
+  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/areal-marft/AReaL-MARFT/experiments/marft
   name_resolve:
     type: nfs
-    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/areal-marft/AReaL-MARFT/name_resolve
+    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/areal-marft/AReaL-MARFT/name_resolve/marft
 
 # 所有 agents 共享同一套资源分配
 allocation_mode: sglang:d1p1t1+d1p1t1
@@ -75,7 +75,7 @@ actor:
   peft_type: lora
   lora_rank: 32
   lora_alpha: 16
-  target_modules: [all-linear]
+  target_modules: [q_proj, v_proj]
 
 critic:
   is_critic: true
@@ -126,7 +126,7 @@ train_dataset:
   max_length: 1024
 
 valid_dataset:
-  batch_size: 128
+  batch_size: 256
   shuffle: true
   pin_memory: true
   num_workers: 4
