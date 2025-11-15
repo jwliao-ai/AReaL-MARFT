@@ -170,28 +170,17 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             Formatted context string to prepend to prompt
         """
         if not context:
-            return ""
+            return f"You are Agent_{agent_id}.\n\nNow, you answer the problem:"
         
-        lines = [f"You are Agent {agent_id}."]
+        lines = [f"You are Agent_{agent_id}.\n"]
+        lines.append("Below are the answers other agents have given:")
         
-        if self.interaction_mode == "sequential":
-            lines.append("Previous agents' responses:")
-            for ctx in context:
-                prev_agent_id = ctx['agent_id']
-                completion = ctx.get('completion', '')
-                reward_str = ""
-                if 'reward' in ctx:
-                    reward_str = f" (reward: {ctx['reward']:.2f})"
-                lines.append(f"- Agent {prev_agent_id}: {completion}{reward_str}")
-            lines.append("\nNow answer the following question:")
+        for ctx in context:
+            prev_agent_id = ctx['agent_id']
+            completion = ctx.get('completion', '')
+            lines.append(f"Agent_{prev_agent_id}: {completion}\n")
         
-        elif self.interaction_mode == "communication":
-            lines.append("Messages from other agents:")
-            for ctx in context:
-                prev_agent_id = ctx['agent_id']
-                completion = ctx.get('completion', '')
-                lines.append(f"[Agent {prev_agent_id}]: {completion}")
-            lines.append("\nYour response:")
+        lines.append("Now, you answer the problem:")
         
         return "\n".join(lines)
     
