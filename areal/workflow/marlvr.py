@@ -167,8 +167,48 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             context: List of context dicts from other agents
         
         Returns:
-            Formatted context string to prepend to prompt
+            Formatted context string to prepend to prompt.
+            Returns empty string for parallel mode.
         """
+        # Parallel mode: no context sharing
+        if self.interaction_mode == "parallel":
+            return ""
+        
+        # Sequential mode: share previous agents' outputs
+        if self.interaction_mode == "sequential":
+            if not context:
+                return f"You are Agent_{agent_id}.\n\nNow, you answer the problem:"
+            
+            lines = [f"You are Agent_{agent_id}.\n"]
+            lines.append("Below are the answers other agents have given:")
+            
+            for ctx in context:
+                prev_agent_id = ctx['agent_id']
+                completion = ctx.get('completion', '')
+                lines.append(f"Agent_{prev_agent_id}: {completion}\n")
+            
+            lines.append("Now, you answer the problem:")
+            
+            return "\n".join(lines)
+        
+        # Communication mode: placeholder for future implementation
+        if self.interaction_mode == "communication":
+            logger.warning(
+                f"Agent {agent_id}: 'communication' mode not yet implemented, "
+                "falling back to sequential format"
+            )
+            # TODO(agent): Implement bidirectional message passing
+            return self._format_sequential_context(agent_id, context)
+        
+        # Unknown mode: log warning and return empty
+        logger.warning(
+            f"Agent {agent_id}: Unknown interaction_mode '{self.interaction_mode}', "
+            "no context will be provided"
+        )
+        return ""
+    
+    def _format_sequential_context(self, agent_id: int, context: list[dict]) -> str:
+        """Helper to format sequential context (extracted for reuse)."""
         if not context:
             return f"You are Agent_{agent_id}.\n\nNow, you answer the problem:"
         
