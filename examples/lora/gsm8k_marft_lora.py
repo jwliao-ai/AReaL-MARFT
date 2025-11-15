@@ -172,23 +172,33 @@ class MultiAgentSystem:
             agent['saver'].ft_spec = ft_spec
     
     def joint_rollout(self, data_batch: list[dict]) -> list[dict]:
-        """Joint rollout with prompt-aligned context."""
+        """Joint rollout - only rank 0 does rollout, all ranks participate in broadcast."""
         rollout_batches = []
         
         for agent_idx, agent in enumerate(self.agents):
-            if dist.get_rank() == 0:
-                batch = agent['rollout'].rollout_batch(
-                    data_batch,
-                    workflow=agent['workflow'],
-                    should_accept_fn=lambda sample: True,
-                )
-                batch = tensor_container_to(batch, agent['actor'].device)
-            
-            # Broadcast batch
-            batch = bcast_and_split_from_rank0(
-                batch, granularity=self.config.actor.group_size
-            )
-            rollout_batches.append(batch)
+            with stats_tracker.scope(f"agent{agent_idx}"):
+                with stats_tracker.record_timing("rollout"):
+                    batch = None
+                    
+                    # ✅ 只有 rank 0 执行 rollout
+                    if dist.get_rank() == 0:
+                        logger.info(f"🚀 Agent {agent_idx} rollout starting...")
+                        batch = agent['rollout'].rollout_batch(
+                            data_batch,
+                            workflow=agent['workflow'],
+                            should_accept_fn=lambda sample: True,
+                        )
+                        logger.info(f"✅ Agent {agent_idx} rollout done")
+                        batch = tensor_container_to(batch, agent['actor'].device)
+                        logger.info(f"✅ Agent {agent_idx} container to done")
+                    
+                    batch = bcast_and_split_from_rank0(
+                        batch, granularity=self.config.actor.group_size
+                    )
+                    logger.info(f"✅ Agent {agent_idx} bcast done")
+                    rollout_batches.append(batch)
+                    
+                    dist.barrier()
         
         return rollout_batches
     
@@ -199,7 +209,6 @@ class MultiAgentSystem:
         Example: Team bonus if all agents solve correctly.
         """
         if dist.get_rank() == 0:
-            # Example team reward logic
             all_correct = all(
                 batch.get('rewards', torch.zeros(1))[0].item() > 0.5
                 for batch in batches
@@ -212,7 +221,6 @@ class MultiAgentSystem:
                     if 'rewards' in batch:
                         batch['rewards'] = batch['rewards'] + team_bonus
         
-        # Broadcast updated rewards
         for batch in batches:
             batch = broadcast_tensor_container(batch, src_rank=0)
     
@@ -224,20 +232,22 @@ class MultiAgentSystem:
         for agent, batch in zip(self.agents, batches):
             agent_id = agent['id']
             
-            with stats_tracker.record_timing(f"agent{agent_id}_critic_values"):
-                values = agent['critic'].compute_values(batch)
-                batch['values'] = values
-                log_gpu_stats(f"agent{agent_id} critic values")
-            
-            if self.config.actor.recompute_logprob or self.config.actor.use_decoupled_loss:
-                with stats_tracker.record_timing(f"agent{agent_id}_recompute_logp"):
-                    logp = agent['actor'].compute_logp(batch)
-                    batch['prox_logp'] = logp
-                    log_gpu_stats(f"agent{agent_id} recompute logp")
-            
-            with stats_tracker.record_timing(f"agent{agent_id}_compute_advantage"):
-                agent['actor'].compute_advantages(batch)
-                log_gpu_stats(f"agent{agent_id} compute advantages")
+            # ✅ Use global stats_tracker with agent-specific scope
+            with stats_tracker.scope(f"agent{agent_id}"):
+                with stats_tracker.record_timing(f"critic_values"):
+                    values = agent['critic'].compute_values(batch)
+                    batch['values'] = values
+                    log_gpu_stats(f"agent{agent_id} critic values")
+                
+                if self.config.actor.recompute_logprob or self.config.actor.use_decoupled_loss:
+                    with stats_tracker.record_timing(f"recompute_logp"):
+                        logp = agent['actor'].compute_logp(batch)
+                        batch['prox_logp'] = logp
+                        log_gpu_stats(f"agent{agent_id} recompute logp")
+                
+                with stats_tracker.record_timing(f"compute_advantage"):
+                    agent['actor'].compute_advantages(batch)
+                    log_gpu_stats(f"agent{agent_id} compute advantages")
         
         # Synchronization barrier
         dist.barrier(device_ids=[self.agents[0]['actor'].device.index])
@@ -247,15 +257,17 @@ class MultiAgentSystem:
         for agent, batch in zip(self.agents, batches):
             agent_id = agent['id']
             
-            with stats_tracker.record_timing(f"agent{agent_id}_ppo_update"):
-                agent['actor'].ppo_update(batch)
-                agent['actor'].step_lr_scheduler()
-                log_gpu_stats(f"agent{agent_id} ppo actor update")
-            
-            with stats_tracker.record_timing(f"agent{agent_id}_critic_update"):
-                agent['critic'].ppo_update(batch)
-                agent['critic'].step_lr_scheduler()
-                log_gpu_stats(f"agent{agent_id} ppo critic update")
+            # ✅ Use scope to prefix all stats from actor/critic
+            with stats_tracker.scope(f"agent{agent_id}"):
+                with stats_tracker.record_timing(f"ppo_update"):
+                    agent['actor'].ppo_update(batch)
+                    agent['actor'].step_lr_scheduler()
+                    log_gpu_stats(f"agent{agent_id} ppo actor update")
+                
+                with stats_tracker.record_timing(f"critic_update"):
+                    agent['critic'].ppo_update(batch)
+                    agent['critic'].step_lr_scheduler()
+                    log_gpu_stats(f"agent{agent_id} ppo critic update")
     
     def update_weights(self, global_step: int):
         """Synchronize all agents' weight versions."""
@@ -263,18 +275,20 @@ class MultiAgentSystem:
             agent['rollout'].pause()
         
         for agent in self.agents:
-            with stats_tracker.record_timing(f"agent{agent['id']}_update_weights"):
-                try:
-                    agent['actor'].update_weights(agent['weight_update_meta'])
-                    agent['actor'].set_version(global_step + 1)
-                    agent['critic'].set_version(global_step + 1)
-                    agent['rollout'].set_version(global_step + 1)
-                except Exception as e:
-                    logger.error(
-                        f"Agent {agent['id']} failed to update weights: {e}",
-                        exc_info=True
-                    )
-                    raise
+            agent_id = agent['id']
+            with stats_tracker.scope(f"agent{agent_id}"):
+                with stats_tracker.record_timing(f"update_weights"):
+                    try:
+                        agent['actor'].update_weights(agent['weight_update_meta'])
+                        agent['actor'].set_version(global_step + 1)
+                        agent['critic'].set_version(global_step + 1)
+                        agent['rollout'].set_version(global_step + 1)
+                    except Exception as e:
+                        logger.error(
+                            f"Agent {agent['id']} failed to update weights: {e}",
+                            exc_info=True
+                        )
+                        raise
         
         for agent in self.agents:
             agent['rollout'].resume()
@@ -282,24 +296,31 @@ class MultiAgentSystem:
     def save_checkpoints(self, epoch: int, step: int, global_step: int):
         """Save all agents' checkpoints."""
         for agent in self.agents:
-            with stats_tracker.record_timing(f"agent{agent['id']}_save"):
-                agent['saver'].save(
-                    agent['actor'], epoch, step, global_step,
-                    tokenizer=self.tokenizer,
-                    name=f"actor_agent{agent['id']}"
-                )
-                agent['saver'].save(
-                    agent['critic'], epoch, step, global_step,
-                    tokenizer=self.tokenizer,
-                    name=f"critic_agent{agent['id']}"
-                )
+            agent_id = agent['id']
+            with stats_tracker.scope(f"agent{agent_id}"):
+                with stats_tracker.record_timing(f"save"):
+                    agent['saver'].save(
+                        agent['actor'], epoch, step, global_step,
+                        tokenizer=self.tokenizer,
+                        name=f"actor_agent{agent['id']}"
+                    )
+                    agent['saver'].save(
+                        agent['critic'], epoch, step, global_step,
+                        tokenizer=self.tokenizer,
+                        name=f"critic_agent{agent['id']}"
+                    )
     
     def destroy(self):
-        """Clean up resources."""
+        """Clean up resources and process groups."""
         for agent in self.agents:
             agent['rollout'].destroy()
             agent['critic'].destroy()
             agent['actor'].destroy()
+        
+        # ✅ 显式销毁 NCCL 进程组
+        if dist.is_initialized():
+            dist.destroy_process_group()
+            logger.info("NCCL process group destroyed")
 
 
 def main(args):
@@ -363,46 +384,24 @@ def main(args):
         if dist.get_rank() == 0:
             base_batch = next(data_generator)
         
-        # Prepare per-agent data batches
-        # Option 1: All agents share same prompts
-        data_batches = [base_batch for _ in range(ma_system.n_agents)]
-        
-        # Option 2: Different prompts per agent (if needed)
-        # data_batches = []
-        # for agent_id in range(n_agents):
-        #     if dist.get_rank() == 0:
-        #         agent_batch = next(data_generator)
-        #     else:
-        #         agent_batch = None
-        #     data_batches.append(agent_batch)
-        
-        # Phase 1: Joint rollout
-        with stats_tracker.record_timing("joint_rollout"):
-            batches = ma_system.joint_rollout(base_batch)
+        batches = ma_system.joint_rollout(base_batch)
         
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
         
-        # Phase 2: Compute joint rewards
         with stats_tracker.record_timing("compute_joint_rewards"):
             ma_system.compute_joint_rewards(batches)
         
-        # Phase 3: Joint training
-        with stats_tracker.record_timing("joint_training"):
-            ma_system.joint_training(batches)
+        ma_system.joint_training(batches)
         
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
         
-        # Phase 4: Update weights
-        with stats_tracker.record_timing("update_weights"):
-            ma_system.update_weights(global_step)
+        ma_system.update_weights(global_step)
         
-        # Save checkpoints
-        with stats_tracker.record_timing("save"):
-            ma_system.save_checkpoints(epoch, step, global_step)
+        ma_system.save_checkpoints(epoch, step, global_step)
         
-        # Log statistics
+        # ✅ Export all statistics (with agent-specific scopes automatically included)
         stats = stats_tracker.export_all(
             reduce_group=ma_system.agents[0]['actor'].data_parallel_group
         )
