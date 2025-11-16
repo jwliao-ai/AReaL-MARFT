@@ -1321,7 +1321,25 @@ class BaseExperimentConfig:
         default="",
         metadata={"help": "Path to the tokenizer."},
     )
-
+    # Multi-agent training configuration
+    n_agents: int = field(
+        default=1,
+        metadata={
+            "help": "Number of agents in multi-agent training. "
+            "Set to 1 for single-agent training (default). "
+            "For multi-agent scenarios, each agent will have independent actor/critic/rollout."
+        },
+    )
+    agent_interaction_mode: str = field(
+        default="sequential",
+        metadata={
+            "help": "Agent interaction mode for multi-agent training. "
+            "Options: 'parallel' (independent rollouts), "
+            "'sequential' (agents observe previous agents' outputs), "
+            "'communication' (explicit agent-to-agent message passing). "
+            "Only applies when n_agents > 1."
+        },
+    )
     train_dataset: DatasetConfig = field(default_factory=DatasetConfig)
     valid_dataset: DatasetConfig | None = field(default=None)
 

@@ -118,7 +118,7 @@ class MAPPOActor(PPOActor):
             loop_range = range(max_seqlen)
         else:
             advantages_reversed = [torch.zeros(bs, dtype=torch.float32, device=values.device)]
-            nextvalues = values[:, max_seqlen - 1] * seq_no_eos_mask # 548 > 433
+            nextvalues = values[:, max_seqlen - 1] * seq_no_eos_mask
             loop_range = range(max_seqlen - 1)
 
         lastgaelam = 0

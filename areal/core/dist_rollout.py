@@ -36,22 +36,18 @@ def _slice_tensor_dict(data: dict[str, Any], start: int, end: int) -> dict[str, 
     """
     sliced_data = {}
     
-    # 1. 使用我们修复后的 get_batch_size 来获取正确的 batch size
     batch_size = get_batch_size(data)
 
     if batch_size == 0:
-        return data # 无法切片，返回原数据
+        return data
 
     for key, value in data.items():
-        # 2. 检查 Tensors
         if torch.is_tensor(value) and value.ndim >= 1 and value.shape[0] == batch_size:
             sliced_data[key] = value[start:end]
             
-        # 3. 检查 Lists (非常重要，对应 multi_modal_input)
         elif isinstance(value, list) and len(value) == batch_size:
             sliced_data[key] = value[start:end]
             
-        # 4. 复制其他所有数据 (例如 scalars, metadata)
         else:
             sliced_data[key] = value
             
@@ -99,13 +95,8 @@ def redistribute(
     )
     local_indices = group_indices[dist.get_rank(group=group)]
 
-    data = concat_padded_tensors([all_data[i] for i in local_indices]) # 64 -> 32
-    
-    # local_indices
-    # [9, 43, 61, 32, 4, 28, 51, 0, 62, 60, 14, 54, 17, 13, 23, 40, 37, 2, 42, 29, 30, 46, 8, 20, 58, 56, 57, 39, 26, 53, 52, 12]
-    # all_data[9]['__global_idx__']
-    # tensor([42], device='cuda:0', dtype=torch.int32)
-    
+    data = concat_padded_tensors([all_data[i] for i in local_indices])
+
     return RedistributedData(
         all_data=all_data,
         data=data,
@@ -132,16 +123,12 @@ def ma_redistribute(
 
     all_data = []
     for d in all_gathered:
-        # 1. 假设 get_batch_size 是我们修改过的 multi-agent 兼容版本
         bs = get_batch_size(d)
         assert bs % granularity == 0
         all_data += [
             _slice_tensor_dict(d, i, i + granularity) for i in range(0, bs, granularity) # _slice_tensor_dict function modified to adapt to multi-agent settings
         ]
 
-    # 2. --- 修改 seqlens 计算逻辑 ---
-    # 不再硬编码 "attention_mask"
-    # 而是累加所有 agent 的 mask 总和，作为此数据块的总"成本"
     seqlens = []
     for d in all_data:
         current_seqlen_sum = 0
@@ -149,20 +136,38 @@ def ma_redistribute(
             if k.endswith("attention_mask") and torch.is_tensor(v):
                 current_seqlen_sum += v.sum().item()
         seqlens.append(current_seqlen_sum)
-    # --- 修改结束 ---
 
-    # 3. --- 删除 Un-padding 循环 ---
-    # 原始的 un-padding 逻辑在 multi-agent 场景下是错误的,
-    # 并且与我们新版的 per-key 'concat_padded_tensors' 逻辑不兼容且不必要。
-    #
-    # 原始错误逻辑:
-    # for d in all_data:
-    #     max_sequence_length = d["attention_mask"].sum(-1).max().item()
-    #     attn_mask_shape = d["attention_mask"].shape
-    #     for k, v in d.items():
-    #         if (... v.shape[:2] == attn_mask_shape[:2] ...):
-    #             d[k] = v[:, :max_sequence_length]
-    # --- 删除完毕 ---
+    for d in all_data:
+        mask_properties = {}
+        for k, v in d.items():
+            if k.endswith("_attention_mask") and torch.is_tensor(v):
+                max_len = v.sum(-1).max().item()
+                shape = v.shape
+                
+                prefix = k[:-len("attention_mask")] 
+                
+                mask_properties[prefix] = {
+                    "max_len": max_len,
+                    "shape": shape
+                }
+
+        sorted_prefixes = sorted(mask_properties.keys(), key=len, reverse=True)
+
+        for k, v in d.items():
+            if not torch.is_tensor(v) or len(v.shape) < 2:
+                continue
+
+            matching_prefix = None
+            for prefix in sorted_prefixes:
+                if k.startswith(prefix):
+                    matching_prefix = prefix
+                    break
+            
+            if matching_prefix is not None:
+                props = mask_properties[matching_prefix]
+                
+                if v.shape[:2] == props["shape"][:2]:
+                    d[k] = v[:, :props["max_len"]]
 
     # No capacity limit leads to balanced partition across this group
     group_indices = ffd_allocate(
@@ -170,8 +175,6 @@ def ma_redistribute(
     )
     local_indices = group_indices[dist.get_rank(group=group)]
 
-    # 4. 假设 concat_padded_tensors 是我们修改过的 per-key 版本
-    # 它会正确地、独立地 padding 'agent0_...' 和 'agent1_...' 的数据
     data = concat_padded_tensors_per_key([all_data[i] for i in local_indices])
 
     return RedistributedData(
@@ -180,7 +183,7 @@ def ma_redistribute(
         rank=dist.get_rank(group=group),
         group_indices=group_indices,
     )
-
+    
 def redistribute_multi_agent(
     data: dict[str, Any],
     num_agents: int,
