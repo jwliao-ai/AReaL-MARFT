@@ -278,7 +278,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
                 "cannot inject context"
             )
             return prompt_data
-    
+        
     async def arun_episode(
         self, engine: InferenceEngine, data: dict[str, Any]
     ) -> dict[str, torch.Tensor] | None:
@@ -290,17 +290,19 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         2. Augments prompt with previous agents' outputs
         3. Generates response
         4. **Writes "agent_{agent_id}_response" back to data** for next agent
+        5. **Preserves global index for cross-agent alignment**
         
         Args:
             engine: Inference engine for generation
             data: Input data dict. Will be modified to add this agent's response.
-                  Expected to contain previous agents' responses as:
-                  {
-                      "messages": [...],
-                      "agent_0_response": {"completion": "...", "reward": ...},
-                      "agent_1_response": {"completion": "...", "reward": ...},
-                      ...
-                  }
+                Expected to contain previous agents' responses as:
+                {
+                    "messages": [...],
+                    "__global_idx__": 0,  # ← Global index from joint_rollout
+                    "agent_0_response": {"completion": "...", "reward": ...},
+                    "agent_1_response": {"completion": "...", "reward": ...},
+                    ...
+                }
         
         Returns:
             Dict with keys:
@@ -311,6 +313,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
                 - versions: Weight versions
                 - attention_mask: Attention mask
                 - rewards: Reward values
+                - __global_idx__: (preserved from input data)
             Returns None if episode should be rejected.
         """
         # 1. Extract context from previous agents in data
@@ -320,8 +323,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             logger.debug(
                 f"Agent {self.agent_id} found context from {len(context)} previous agent(s)"
             )
-            
-        # TODO: format context
+        
         # 2. Extract and augment prompt with context
         original_prompt_data = self.data_extract_prompt_fn(data)
         augmented_prompt_data = self._augment_prompt_with_context(
@@ -377,18 +379,18 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
                 "versions": torch.tensor(versions, dtype=torch.int32),
                 "attention_mask": torch.ones(len(seq), dtype=torch.bool),
                 "rewards": torch.tensor(reward, dtype=torch.float32),
+                "__global_idx__": torch.tensor(data.get("__global_idx__", -1), dtype=torch.int32),  # ✅ 携带全局索引
             }
             res = {k: v.unsqueeze(0) for k, v in res.items()}
             results.append(res)
         
-        # 6. ✅ Write this agent's response back to data for next agent
-        # Use the first sample's completion and average reward as representative
+        # 6. Write this agent's response back to data for next agent
         if resps and completions_strs:
             data[self.response_key] = {
-                "completion": completions_strs[0],  # First sample
-                "reward": sum(rewards) / len(rewards),  # Average reward
+                "completion": completions_strs[0],
+                "reward": sum(rewards) / len(rewards),
                 "prompt": prompt_str,
-                "response_ids": resps[0].output_tokens,  # Token IDs for advanced use
+                "response_ids": resps[0].output_tokens,
             }
             logger.debug(
                 f"Agent {self.agent_id} wrote response to data['{self.response_key}']"

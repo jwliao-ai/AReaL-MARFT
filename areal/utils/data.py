@@ -153,13 +153,26 @@ def pad_input(hidden_states, indices, batch, seqlen):
 def concat_padded_tensors(
     tensor_dicts: list[dict[str, Any]], pad_value: float = 0.0
 ) -> dict[str, Any]:
-    """Concatenate and pad tensors from multiple dictionaries of padded tensors."""
+    """
+    Concatenate and pad tensors from multiple dictionaries of padded tensors.
+    MODIFIED: Flexibly handles any key ending with 'attention_mask'.
+    """
     if not tensor_dicts:
         return {}
 
+    # --- 1. 修改 max_length 的计算方式 ---
     # Find max sequence length across all dictionaries
-    assert all("attention_mask" in td for td in tensor_dicts)
-    max_length = max([x["attention_mask"].shape[1] for x in tensor_dicts])
+    # 移除了 'assert all("attention_mask" in td for td in tensor_dicts)'
+    
+    # 通过遍历所有字典和所有键来找到最大的序列长度
+    max_length = 0
+    for td in tensor_dicts:
+        for key, tensor in td.items():
+            # 检查键是否以 "attention_mask" 结尾，并且是一个 2D+ 张量
+            if key.endswith("attention_mask") and len(tensor.shape) > 1:
+                max_length = max(max_length, tensor.shape[1])
+    # --- 修改结束 ---
+
     result = {}
 
     has_any_multi_modal = any("multi_modal_input" in td for td in tensor_dicts)
@@ -171,7 +184,7 @@ def concat_padded_tensors(
 
         # Merge multi-modal data maintaining per-dp correspondence
         for tensor_dict in tensor_dicts:
-            td_batch_size = get_batch_size(tensor_dict)
+            td_batch_size = get_batch_size(tensor_dict) # 假设此函数已定义
 
             if "multi_modal_input" in tensor_dict:
                 # Has multi_modal_input - extend the lists
@@ -183,12 +196,19 @@ def concat_padded_tensors(
 
         result["multi_modal_input"] = merged_multi_modal
 
-    # Process each key
+    # 假设列表中的所有字典都具有相似的键结构（原始逻辑）
+    # 注意：如果 tensor_dicts[0] 碰巧缺少某个 key (例如它没有 agent1_... 
+    # 但 tensor_dicts[1] 有)，原始逻辑会跳过该 key。
+    # 为保持最小改动，我们沿用此逻辑。
+    if not tensor_dicts: # 再次检查，以防 tensor_dicts[0] 访问出错
+        return result
+        
     for key in tensor_dicts[0].keys():
         tensors_to_concat = []
         if key == "multi_modal_input":
             continue
         for tensor_dict in tensor_dicts:
+            # 假设如果 key 存在于第一个字典中，它也存在于其他字典中
             tensor = tensor_dict[key]
             # Skip 1D tensors like rewards
             if len(tensor.shape) == 1:
@@ -198,7 +218,10 @@ def concat_padded_tensors(
             if current_length < max_length:
                 # Pad tensor to max_length
                 pad_width = max_length - current_length
-                if key == "attention_mask":
+                
+                # --- 2. 修改 Padding 逻辑 ---
+                if key.endswith("attention_mask"):
+                # --- 修改结束 ---
                     # Pad attention mask with 0s
                     padding = torch.zeros(
                         (tensor.shape[0], pad_width),
