@@ -13,7 +13,7 @@ import torch.distributed as dist
 from areal.api.alloc_mode import AllocationMode
 from areal.api.cli_args import PPOConfig, load_expr_config
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
-from areal.core.dist_rollout import redistribute, redistribute_multi_agent
+from areal.core.dist_rollout import ma_redistribute, redistribute_multi_agent
 from areal.dataset import get_custom_dataset
 from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.ppo.mas_actor import FSDPMAPPOActor
@@ -27,6 +27,7 @@ from areal.utils.data import (
     cycle_dataloader,
     get_batch_size,
     tensor_container_to,
+    concat_padded_tensors_per_key,
 )
 from areal.utils.dataloader import create_dataloader
 from areal.utils.device import log_gpu_stats
@@ -66,8 +67,9 @@ def bcast_and_split_from_rank0(unified_batch: dict | None, granularity: int) -> 
     local_batch = []
     for i in range(dist.get_rank() * bs_per_rank, (dist.get_rank() + 1) * bs_per_rank):
         local_batch.append({k: v[i : i + 1] for k, v in unified_batch.items()})
-    local_batch = concat_padded_tensors(local_batch)
-    return redistribute(local_batch, granularity=granularity).data
+    # local_batch = concat_padded_tensors(local_batch)
+    local_batch = concat_padded_tensors_per_key(local_batch) # 32 -> 18 ??
+    return ma_redistribute(local_batch, granularity=granularity).data
 
 class MultiAgentSystem:
     """Manages multiple agents' joint rollout and training."""
@@ -216,13 +218,13 @@ class MultiAgentSystem:
                         # # not working because redistribute will change the order still
                         # # so we need to get the unified data, redistribute and unpack the unified data batch
                         # batch = bcast_and_split_from_rank0(batch, granularity=self.config.actor.group_size)
-                        agent_batches.append(batch)
+                        agent_batches.append(batch) # agent0: [8,486]; agent1: [8,517]
 
             for agent_idx, batch in enumerate(agent_batches):
                 for key, value in batch.items():
                     unified_batch[f"agent{agent_idx}_{key}"] = value
         
-        unified_batch = bcast_and_split_from_rank0(unified_batch, granularity=self.config.actor.group_size)
+        unified_batch = bcast_and_split_from_rank0(unified_batch, granularity=self.config.actor.group_size) # agent0: [8,645]; agent1: [8,549]
         
         # now start to unpack
         rollout_batches = []
@@ -241,54 +243,6 @@ class MultiAgentSystem:
                 
             rollout_batches.append(agent_batch)
             logger.info(f"✅ Agent {agent_idx} batch unpacked with {len(agent_batch)} fields on rank {dist.get_rank()}")
-        # rollout_batches = [unified_batch]
-            
-        # agent_batches = broadcast_tensor_container(agent_batches, src_rank=0)
-        
-        # bs = get_batch_size(agent_batches[0])
-        # world_size = dist.get_world_size()
-        
-        # if bs % world_size != 0:
-        #     valid_bs = (bs // world_size) * world_size
-        #     if valid_bs == 0:
-        #         raise RuntimeError(f"Batch size {bs} < world size {world_size}. Cannot split.")
-        #     agent_batches = [{k: v[:valid_bs] for k, v in batch_item.items()} for batch_item in agent_batches]
-        #     bs = valid_bs
-        
-        # bs_per_rank = bs // world_size
-        # local_agent_batches = []
-        # for batch in agent_batches:
-        #     local_batch = []
-        #     for i in range(dist.get_rank() * bs_per_rank, (dist.get_rank() + 1) * bs_per_rank):
-        #         local_batch.append({k: v[i : i + 1] for k, v in batch.items()})
-        #     local_batch = concat_padded_tensors(local_batch)
-        #     local_agent_batches.append(local_batch)
-        
-        # local_unified_batch = {}
-        # for agent_idx, batch in enumerate(local_agent_batches):
-        #     for key, value in batch.items():
-        #         local_unified_batch[f"agent{agent_idx}_{key}"] = value
-            
-        # unified_batch = redistribute_multi_agent(local_unified_batch, num_agents=len(self.agents), granularity=self.config.actor.group_size).data
-        
-        # rollout_batches = []
-        # for agent_idx in range(self.n_agents):
-        #     agent_batch = {}
-        #     prefix = f"agent{agent_idx}_"
-            
-        #     for key in list(unified_batch.keys()):
-        #         if key.startswith(prefix):
-        #             # 移除前缀，恢复原始字段名
-        #             original_key = key[len(prefix):]
-        #             agent_batch[original_key] = unified_batch[key]
-            
-        #     # 清理临时索引
-        #     if '__global_idx__' in agent_batch:
-        #         del agent_batch['__global_idx__']
-            
-        #     rollout_batches.append(agent_batch)
-        #     logger.info(f"✅ Agent {agent_idx} batch unpacked with {len(agent_batch)} fields on rank {dist.get_rank()}")
-        # # rollout_batches = [unified_batch]
         
         dist.barrier()
         return rollout_batches
@@ -325,10 +279,18 @@ class MultiAgentSystem:
             agent = self.agents[i]
             batch = batches[i]
             agent_id = agent['id']
+            # 这里都是 517
+            # 而实际上应该是这个rank上的padding
+            # 所以说是 先padding然后分的
+            print(f"rank {dist.get_rank()}, input_ids shape {batch['input_ids'].shape}")
             
             with stats_tracker.scope(f"agent{agent_id}"):
                 with stats_tracker.record_timing(f"critic_values"):
-                    values = agent['critic'].compute_values(batch)
+                    values = agent['critic'].compute_values(batch) # agent1: [4,549]
+                    # 有一个input_ids是短的，计算values之后后面被mask掉的就没了
+                    # rank 1, agent 1, values shape torch.Size([4, 347])
+                    # rank 0, agent 1, values shape torch.Size([4, 517])
+                    print(f"rank {dist.get_rank()}, agent {agent_id}, values shape {values.shape}")
                     batch['values'] = values
                     log_gpu_stats(f"agent{agent_id} critic values")
 

@@ -18,26 +18,40 @@ from areal.utils import datapack, logging
 
 logger = logging.getLogger("data utils")
 
-
 def get_batch_size(data: dict[str, Any]) -> int:
+    """
+    MODIFIED: Flexibly get batch size by checking for key suffixes
+    (e.g., '_attention_mask', '_cu_seqlens', '_multi_modal_input')
+    to support multi-agent scenarios.
+    """
     if not data:
         return 0
 
-    am = data.get("attention_mask")
-    if torch.is_tensor(am) and am.ndim >= 1:
-        return int(am.shape[0])
+    # 优先级 1: 查找任何 *_attention_mask
+    for key, value in data.items():
+        if key.endswith("attention_mask"):
+            if torch.is_tensor(value) and value.ndim >= 1:
+                return int(value.shape[0])
 
-    cu = data.get("cu_seqlens")
-    if torch.is_tensor(cu) and cu.ndim >= 1 and cu.numel() >= 1:
-        return max(int(cu.shape[0]) - 1, 0)
+    # 优先级 2: 查找任何 *_cu_seqlens
+    for key, value in data.items():
+        if key.endswith("cu_seqlens"):
+            if torch.is_tensor(value) and value.ndim >= 1 and value.numel() >= 1:
+                # cu_seqlens 长度通常是 B+1
+                return max(int(value.shape[0]) - 1, 0)
 
-    mmi = data.get("multi_modal_input")
-    if isinstance(mmi, list):
-        return len(mmi)
+    # 优先级 3: 查找任何 *_multi_modal_input (必须是 list)
+    for key, value in data.items():
+        if key.endswith("multi_modal_input"):
+            if isinstance(value, list):
+                return len(value)
 
-    for v in data.values():
-        if torch.is_tensor(v) and v.ndim >= 1:
-            return int(v.shape[0])
+    # 优先级 4: 兜底方案 (Fallback)，查找任何张量
+    for value in data.values():
+        if torch.is_tensor(value) and value.ndim >= 1:
+            # 确保它不是一个空的 cu_seqlens (B=0)
+            if value.numel() >= 1:
+                return int(value.shape[0])
 
     return 0
 
@@ -149,6 +163,108 @@ def pad_input(hidden_states, indices, batch, seqlen):
     output[indices] = hidden_states
     return rearrange(output, "(b s) ... -> b s ...", b=batch)
 
+def concat_padded_tensors_per_key(
+    tensor_dicts: list[dict[str, Any]], pad_value: float = 0.0
+) -> dict[str, Any]:
+    """
+    Concatenate and pad tensors from multiple dictionaries.
+    MODIFIED: Padding is isolated per-key (e.g., per-agent).
+    Finds max_length for 'agent0_input_ids' and 'agent1_input_ids' separately.
+    """
+    if not tensor_dicts:
+        return {}
+
+    result = {}
+
+    # --- 1. 收集所有字典中出现过的所有唯一的 key ---
+    all_keys = set().union(*[td.keys() for td in tensor_dicts])
+
+    # --- 2. 独立处理 Multi-Modal Keys ---
+    # 泛化原始逻辑，使其适用于 agent0_multi_modal_input 等
+    multi_modal_keys = {k for k in all_keys if k.endswith("multi_modal_input")}
+
+    for mm_key in multi_modal_keys:
+        merged_multi_modal = []
+        for tensor_dict in tensor_dicts:
+            # 必须使用一个能感知 multi-agent 的 get_batch_size
+            td_batch_size = get_batch_size(tensor_dict)
+
+            if mm_key in tensor_dict:
+                # 找到了 key，直接扩展
+                multi_modal = tensor_dict[mm_key]
+            else:
+                # Key 不存在，但这个 dict 可能属于另一个 agent。
+                # 只有当这个 dict 包含其他数据时，我们才
+                # 应该为其填充空的 multi-modal 数据。
+                if td_batch_size > 0:
+                    multi_modal = [{} for _ in range(td_batch_size)]
+                else:
+                    multi_modal = [] # dict 为空，不贡献 batch
+
+            merged_multi_modal.extend(multi_modal)
+        
+        result[mm_key] = merged_multi_modal
+
+    # --- 3. 独立处理所有其他的 Tensor Keys ---
+    tensor_keys = all_keys - multi_modal_keys
+
+    for key in tensor_keys:
+        tensors_to_concat = []
+        key_max_length = 0
+
+        # --- Pass 1: 收集此 key 的所有 Tensors, 并计算此 key 专属的 max_length ---
+        for tensor_dict in tensor_dicts:
+            if key in tensor_dict:
+                tensor = tensor_dict[key]
+                tensors_to_concat.append(tensor)
+                
+                # 检查是否是需要 padding 的 2D+ 张量
+                if len(tensor.shape) > 1:
+                    key_max_length = max(key_max_length, tensor.shape[1])
+        
+        if not tensors_to_concat:
+            continue # 此 key 在所有 dicts 中都找不到 (理论上不应发生)
+
+        # --- Pass 2: 使用 key_max_length 进行 Padding 和 Concat ---
+        padded_tensors = []
+        for tensor in tensors_to_concat:
+            # 1D 张量 (如 rewards) 不需要 padding
+            if len(tensor.shape) == 1:
+                padded_tensors.append(tensor)
+                continue
+            
+            # 2D+ 张量
+            current_length = tensor.shape[1]
+            if current_length < key_max_length:
+                pad_width = key_max_length - current_length
+                
+                if key.endswith("attention_mask"):
+                    # Pad attention mask with 0s
+                    padding = torch.zeros(
+                        (tensor.shape[0], pad_width),
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                    )
+                else:
+                    # Pad feature tensors with pad_value
+                    padding = torch.full(
+                        (tensor.shape[0], pad_width),
+                        pad_value,
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                    )
+
+                padded_tensor = torch.cat([tensor, padding], dim=1)
+                padded_tensors.append(padded_tensor)
+            else:
+                padded_tensors.append(tensor) # 长度已是最大，无需 padding
+
+        # --- 最终拼接 ---
+        # 确保列表不为空，以防万一
+        if padded_tensors:
+            result[key] = torch.cat(padded_tensors, dim=0)
+
+    return result
 
 def concat_padded_tensors(
     tensor_dicts: list[dict[str, Any]], pad_value: float = 0.0
@@ -954,19 +1070,30 @@ def all_gather_tensor_container(data, group=None) -> list:
         return [_unpad_unflatten(y, shape) for y, shape in zip(ys, shapes)]
 
     if isinstance(data, list):
+        # List 是有序的，所以这个逻辑是安全的
         data = [all_gather_tensor_container(d, group=group) for d in data]
         return list(zip(*data))
 
     if isinstance(data, dict):
-        results = {
-            k: all_gather_tensor_container(v, group=group) for k, v in data.items()
-        }
+        # --- 这是关键的修改 ---
+        # 1. 对键进行排序，确保所有 rank 的迭代顺序一致
+        sorted_keys = sorted(data.keys())
+        
+        results = {}
+        # 2. 按照排序后的键的顺序执行递归调用
+        for k in sorted_keys:
+            v = data[k]
+            results[k] = all_gather_tensor_container(v, group=group)
+        # --- 修改结束 ---
+
+        # 重新组合字典 (这部分逻辑保持不变)
         results = [
             {k: v[i] for k, v in results.items()}
             for i in range(dist.get_world_size(group))
         ]
         return results
 
+    # Fallback for other picklable objects
     results = [None for _ in range(dist.get_world_size(group))]
     dist.all_gather_object(results, data, group=group)
     return results
