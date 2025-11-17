@@ -9,7 +9,7 @@ class Evaluator:
 
     def __init__(self, config: EvaluatorConfig, ft_spec: FinetuneSpec):
         self.config = config
-        self.ft_sepc = ft_spec
+        self.ft_spec = ft_spec
         self.freq_ctl = timeutil.EpochStepTimeFreqCtl(
             freq_epoch=config.freq_epochs,
             freq_step=config.freq_steps,
@@ -30,7 +30,7 @@ class Evaluator:
         global_step: int,
     ):
         if not self.freq_ctl.check(
-            epochs=int(step == self.ft_sepc.steps_per_epoch - 1), steps=1
+            epochs=int(step == self.ft_spec.steps_per_epoch - 1), steps=1
         ):
             return
         evaluate_fn()
