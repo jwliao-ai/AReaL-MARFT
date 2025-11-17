@@ -129,6 +129,11 @@ class MultiAgentSystem:
                 train_data_parallel_size=1,
             )
             
+            # ✅ Eval rollout engine - separate instance for evaluation
+            eval_rollout = RemoteSGLangEngine(deepcopy(agent_config.rollout))
+            eval_rollout.config.max_head_offpolicyness = int(1e12)
+            eval_rollout.initialize(addr=agent_addr)
+            
             # Multi-agent workflow with context support
             workflow = MultiAgentRLVRWorkflow(
                 agent_id=agent_id,
@@ -143,6 +148,21 @@ class MultiAgentSystem:
                 ),
             )
             
+            # ✅ Eval workflow with lower temperature for more deterministic evaluation
+            eval_workflow = MultiAgentRLVRWorkflow(
+                agent_id=agent_id,
+                reward_fn=gsm8k_reward_fn,
+                gconfig=agent_config.gconfig.new(temperature=0.6),
+                tokenizer=self.tokenizer,
+                enable_thinking=False,
+                interaction_mode=self.interaction_mode,
+                rollout_stat_scope=f"agent{agent_id}-eval-rollout",
+                dump_dir=os.path.join(
+                    StatsLogger.get_log_path(agent_config.stats_logger),
+                    f"agent_{agent_id}/generated-eval"
+                ),
+            )
+            
             # ✅ Weight update meta：使用 agent-specific experiment_name
             weight_update_meta = WeightUpdateMeta.from_disk(
                 agent_config.actor.experiment_name,  # agent-specific
@@ -154,15 +174,21 @@ class MultiAgentSystem:
             # Saver
             saver = Saver(agent_config.saver, None)  # ft_spec set later
             
+            # Evaluator
+            evaluator = Evaluator(agent_config.evaluator, None)  # ft_spec set later
+            
             self.agents.append({
                 'id': agent_id,
                 'config': agent_config,
                 'actor': actor,
                 'critic': critic,
                 'rollout': rollout,
+                'eval_rollout': eval_rollout,
                 'workflow': workflow,
+                'eval_workflow': eval_workflow,
                 'weight_update_meta': weight_update_meta,
                 'saver': saver,
+                'evaluator': evaluator,
             })
             
             logger.info(f"Initialized agent {agent_id}")
@@ -174,6 +200,7 @@ class MultiAgentSystem:
             agent['actor'].connect_engine(agent['rollout'], agent['weight_update_meta'])
             agent['critic'].initialize(None, ft_spec)
             agent['saver'].ft_spec = ft_spec
+            agent['evaluator'].ft_spec = ft_spec
         
     def joint_rollout(self, data_batch: list[dict]) -> list[dict]:
         """Joint rollout - only rank 0 does rollout, all ranks participate in broadcast."""
@@ -343,6 +370,7 @@ class MultiAgentSystem:
                         agent['actor'].set_version(global_step + 1)
                         agent['critic'].set_version(global_step + 1)
                         agent['rollout'].set_version(global_step + 1)
+                        agent['eval_rollout'].set_version(global_step + 1)
                     except Exception as e:
                         logger.error(
                             f"Agent {agent['id']} failed to update weights: {e}",
@@ -370,9 +398,50 @@ class MultiAgentSystem:
                         name=f"critic_agent{agent['id']}"
                     )
     
+    def evaluate(self, valid_dataloader, epoch: int, step: int, global_step: int):
+        """
+        Run joint evaluation for all agents with sequential decision-making.
+        
+        This mirrors the training rollout behavior:
+        - Agent 0 generates first
+        - Agent 1 sees Agent 0's output and generates
+        - And so on...
+        """
+        def evaluate_fn():
+            if dist.get_rank() == 0:
+                # ✅ Sequential evaluation: agents process data one after another
+                for data_batch in valid_dataloader:
+                    # Each data_batch is a list of samples
+                    for agent_idx, agent in enumerate(self.agents):
+                        # For sequential mode, each agent sees previous agents' outputs
+                        # which are written into the data dict by the workflow
+                        with stats_tracker.scope(f"agent{agent_idx}"):
+                            for item in data_batch:
+                                agent['eval_rollout'].submit(item, agent['eval_workflow'])
+                        
+                        # Wait for this agent to finish before next agent starts
+                        agent['eval_rollout'].wait(len(data_batch), timeout=None)
+                        logger.info(
+                            f"✅ Agent {agent_idx} evaluation completed for batch "
+                            f"(sequential mode)"
+                        )
+            
+            dist.barrier(device_ids=[self.agents[0]['actor'].device.index])
+            current_platform.synchronize()
+        
+        # ✅ Run evaluation once for all agents (not per-agent)
+        with stats_tracker.record_timing("eval"):
+            self.agents[0]['evaluator'].evaluate(
+                evaluate_fn,
+                epoch,
+                step,
+                global_step,
+            )
+    
     def destroy(self):
         """Clean up resources and process groups."""
         for agent in self.agents:
+            agent['eval_rollout'].destroy()
             agent['rollout'].destroy()
             agent['critic'].destroy()
             agent['actor'].destroy()
@@ -407,12 +476,21 @@ def main(args):
     train_dataset = get_custom_dataset(
         split="train", dataset_config=config.train_dataset, tokenizer=tokenizer
     )
+    valid_dataset = get_custom_dataset(
+        split="test", dataset_config=config.valid_dataset, tokenizer=tokenizer
+    )
     
     train_dataloader = create_dataloader(
         train_dataset,
         rank=0,
         world_size=1,
         dataset_config=config.train_dataset,
+    )
+    valid_dataloader = create_dataloader(
+        valid_dataset,
+        rank=0,
+        world_size=1,
+        dataset_config=config.valid_dataset,
     )
     
     # FinetuneSpec
@@ -460,6 +538,15 @@ def main(args):
         ma_system.update_weights(global_step)
         
         ma_system.save_checkpoints(epoch, step, global_step)
+        
+        dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
+        current_platform.synchronize()
+        
+        # ✅ Evaluation
+        ma_system.evaluate(valid_dataloader, epoch, step, global_step)
+        
+        dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
+        current_platform.synchronize()
         
         # ✅ Export all statistics (with agent-specific scopes automatically included)
         stats = stats_tracker.export_all(
