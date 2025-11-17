@@ -102,18 +102,15 @@ class MultiAgentSystem:
         
         for agent_id in range(self.n_agents):
             agent_config = deepcopy(self.config)
-            # ✅ 关键：确保每个 agent 的 experiment_name 完全独立
             agent_config.actor.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             agent_config.critic.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             agent_config.rollout.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             
-            # ✅ 同时修改 saver/recover/evaluator 的 experiment_name
             agent_config.saver.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             agent_config.recover.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             agent_config.evaluator.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             
             # Actor
-            # actor = FSDPPPOActor(config=agent_config.actor)
             actor = FSDPMAPPOActor(config=agent_config.actor)
             actor.create_process_group(parallel_strategy=self.parallel_strategy)
             
@@ -121,7 +118,7 @@ class MultiAgentSystem:
             critic = FSDPPPOCritic(config=agent_config.critic)
             critic.create_process_group(parallel_strategy=self.parallel_strategy)
             
-            # ✅ Rollout engine - pass addr directly to initialize()
+            # Rollout engine - pass addr directly to initialize()
             rollout = RemoteSGLangEngine(agent_config.rollout)
             agent_addr = f"{sglang_host}:{base_port + agent_id}"
             rollout.initialize(
@@ -129,7 +126,7 @@ class MultiAgentSystem:
                 train_data_parallel_size=1,
             )
             
-            # ✅ Eval rollout engine - separate instance for evaluation
+            # Eval rollout engine - separate instance for evaluation
             eval_rollout = RemoteSGLangEngine(deepcopy(agent_config.rollout))
             eval_rollout.config.max_head_offpolicyness = int(1e12)
             eval_rollout.initialize(addr=agent_addr)
@@ -148,7 +145,7 @@ class MultiAgentSystem:
                 ),
             )
             
-            # ✅ Eval workflow with lower temperature for more deterministic evaluation
+            # Eval workflow with lower temperature for more deterministic evaluation
             eval_workflow = MultiAgentRLVRWorkflow(
                 agent_id=agent_id,
                 reward_fn=gsm8k_reward_fn,
@@ -163,7 +160,7 @@ class MultiAgentSystem:
                 ),
             )
             
-            # ✅ Weight update meta：使用 agent-specific experiment_name
+            # Weight update meta：使用 agent-specific experiment_name
             weight_update_meta = WeightUpdateMeta.from_disk(
                 agent_config.actor.experiment_name,  # agent-specific
                 agent_config.actor.trial_name,
@@ -219,7 +216,7 @@ class MultiAgentSystem:
                 with stats_tracker.scope(f"agent{agent_idx}"):
                     with stats_tracker.record_timing("rollout"):
                         batch = None
-                        logger.info(f"🚀 Agent {agent_idx} rollout starting...")
+                        logger.info(f"Agent {agent_idx} rollout starting...")
                         batch = agent['rollout'].rollout_batch(
                             data_batch,
                             workflow=agent['workflow'],
@@ -228,7 +225,7 @@ class MultiAgentSystem:
                         logger.info(f"✅ Agent {agent_idx} rollout done")
                         batch = tensor_container_to(batch, agent['actor'].device)
                         
-                        # ✅ 关键：立即恢复顺序（基于 __global_idx__）
+                        # recover the order for action tuple collection
                         if '__global_idx__' in batch:
                             indices = batch['__global_idx__']
                             sorted_indices = torch.sort(indices)[0]
@@ -251,7 +248,7 @@ class MultiAgentSystem:
                 for key, value in batch.items():
                     unified_batch[f"agent{agent_idx}_{key}"] = value
         
-        unified_batch = bcast_and_split_from_rank0(unified_batch, granularity=self.config.actor.group_size) # agent0: [8,645]; agent1: [8,549]
+        unified_batch = bcast_and_split_from_rank0(unified_batch, granularity=self.config.actor.group_size)
         
         # now start to unpack
         rollout_batches = []
@@ -306,18 +303,10 @@ class MultiAgentSystem:
             agent = self.agents[i]
             batch = batches[i]
             agent_id = agent['id']
-            # 这里都是 517
-            # 而实际上应该是这个rank上的padding
-            # 所以说是 先padding然后分的
-            print(f"rank {dist.get_rank()}, input_ids shape {batch['input_ids'].shape}")
             
             with stats_tracker.scope(f"agent{agent_id}"):
                 with stats_tracker.record_timing(f"critic_values"):
-                    values = agent['critic'].compute_values(batch) # agent1: [4,549]
-                    # 有一个input_ids是短的，计算values之后后面被mask掉的就没了
-                    # rank 1, agent 1, values shape torch.Size([4, 347])
-                    # rank 0, agent 1, values shape torch.Size([4, 517])
-                    print(f"rank {dist.get_rank()}, agent {agent_id}, values shape {values.shape}")
+                    values = agent['critic'].compute_values(batch)
                     batch['values'] = values
                     log_gpu_stats(f"agent{agent_id} critic values")
 
@@ -398,7 +387,7 @@ class MultiAgentSystem:
                         name=f"critic_agent{agent['id']}"
                     )
     
-    def evaluate(self, valid_dataloader, epoch: int, step: int, global_step: int):
+    def evaluate(self, valid_dataloader, epoch: int, step: int, global_step: int, force_run: bool = False):
         """
         Run joint evaluation for all agents with sequential decision-making.
         
@@ -406,6 +395,13 @@ class MultiAgentSystem:
         - Agent 0 generates first
         - Agent 1 sees Agent 0's output and generates
         - And so on...
+        
+        Args:
+            valid_dataloader: Validation data loader
+            epoch: Current epoch
+            step: Current step within epoch
+            global_step: Global training step
+            force_run: If True, bypass frequency control and always run evaluation
         """
         def evaluate_fn():
             if dist.get_rank() == 0:
@@ -431,12 +427,16 @@ class MultiAgentSystem:
         
         # ✅ Run evaluation once for all agents (not per-agent)
         with stats_tracker.record_timing("eval"):
-            self.agents[0]['evaluator'].evaluate(
-                evaluate_fn,
-                epoch,
-                step,
-                global_step,
-            )
+            if force_run:
+                # Bypass frequency control for initial evaluation
+                evaluate_fn()
+            else:
+                self.agents[0]['evaluator'].evaluate(
+                    evaluate_fn,
+                    epoch,
+                    step,
+                    global_step,
+                )
     
     def destroy(self):
         """Clean up resources and process groups."""
@@ -456,13 +456,12 @@ def main(args):
     config, _ = load_expr_config(args, PPOConfig)
     config: PPOConfig
     
-    # # 👇 在子进程启动时初始化 debugpy（仅 rank 0）
     # rank = int(os.getenv("RANK", "0"))
     # if rank == 0 and os.getenv("DEBUG_CHILD_PROCESS") == "1":
     #     import debugpy
-    #     debugpy.listen(("0.0.0.0", 5678))  # 监听端口 5678
+    #     debugpy.listen(("0.0.0.0", 5678))
     #     print(f"⚠️  Waiting for debugger to attach on port 5678...")
-    #     debugpy.wait_for_client()  # 阻塞等待 VS Code 连接
+    #     debugpy.wait_for_client()
     #     print(f"✅ Debugger attached!")
         
     rank = int(os.getenv("RANK", "0"))
@@ -513,6 +512,20 @@ def main(args):
     max_steps = total_epochs * steps_per_epoch
     data_generator = cycle_dataloader(train_dataloader)
     
+    # Initial evaluation at step 0 (before any training)
+    logger.info("Running initial evaluation at step 0 before training...")
+    ma_system.evaluate(valid_dataloader, epoch=0, step=0, global_step=0, force_run=True)
+    
+    dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
+    current_platform.synchronize()
+    
+    # Export initial evaluation stats
+    initial_stats = stats_tracker.export_all(
+        reduce_group=ma_system.agents[0]['actor'].data_parallel_group
+    )
+    stats_logger.commit(epoch=0, step=0, global_step=0, data=initial_stats)
+    
+    logger.info("Starting training loop...")
     for global_step in range(max_steps):
         epoch = global_step // steps_per_epoch
         step = global_step % steps_per_epoch
@@ -542,17 +555,17 @@ def main(args):
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
         
-        # ✅ Evaluation
+        # Evaluation
         ma_system.evaluate(valid_dataloader, epoch, step, global_step)
         
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
         
-        # ✅ Export all statistics (with agent-specific scopes automatically included)
+        # Export all statistics (with agent-specific scopes automatically included)
         stats = stats_tracker.export_all(
             reduce_group=ma_system.agents[0]['actor'].data_parallel_group
         )
-        stats_logger.commit(epoch, step, global_step, stats)
+        stats_logger.commit(epoch, step, global_step, data=stats)
         
         # Cleanup
         for batch in batches:
