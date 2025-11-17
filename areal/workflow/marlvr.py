@@ -80,6 +80,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         ] = default_get_input_ids_fn,
         data_extract_prompt_fn: Callable[[dict[str, Any]], Any] | None = None,
         context_format_fn: Callable[[int, list[dict]], str] | None = None,
+        system_prompt: str | None = None,
     ):
         """
         Initialize multi-agent workflow.
@@ -96,12 +97,11 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             get_input_ids_fn: Custom function to extract input_ids from data
             data_extract_prompt_fn: Custom function to extract prompt from data
             context_format_fn: Custom function to format context from other agents
+            system_prompt: Agent-specific system prompt (e.g., role description)
         """
-        # Set default rollout_stat_scope if not provided
         if rollout_stat_scope is None:
             rollout_stat_scope = f"agent{agent_id}_rollout"
         
-        # Set default data_extract_prompt_fn if not provided
         if data_extract_prompt_fn is None:
             data_extract_prompt_fn = lambda data: data.get("messages", data)
         
@@ -120,10 +120,12 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         self.interaction_mode = interaction_mode
         self.response_key = f"agent_{agent_id}_response"
         self.context_format_fn = context_format_fn or self._default_context_format
+        self.system_prompt = system_prompt
         
         logger.info(
             f"Initialized Agent {agent_id} with interaction_mode='{interaction_mode}', "
-            f"response_key='{self.response_key}'"
+            f"response_key='{self.response_key}', "
+            f"system_prompt={'set' if system_prompt else 'not set'}"
         )
     
     def _extract_previous_agent_responses(self, data: dict[str, Any]) -> list[dict]:
@@ -228,54 +230,55 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         self, prompt_data: Any, context: list[dict]
     ) -> Any:
         """
-        Augment the prompt with context from other agents.
+        Augment the prompt with context from other agents and system prompt.
         
         Args:
             prompt_data: Original prompt data (typically a list of message dicts)
             context: List of context dicts from previous agents
         
         Returns:
-            Augmented prompt data with context injected
+            Augmented prompt data with context and system prompt injected
         """
-        # Skip if no context or parallel mode
-        if not context or self.interaction_mode == "parallel":
-            return prompt_data
+        context_str = ""
+        if context and self.interaction_mode != "parallel":
+            context_str = self.context_format_fn(self.agent_id, context)
         
-        # Format context string
-        context_str = self.context_format_fn(self.agent_id, context)
-        
-        if not context_str:
-            return prompt_data
-        
-        # Handle chat format (list of message dicts)
         if isinstance(prompt_data, list) and prompt_data:
             augmented_data = deepcopy(prompt_data)
             
-            # Find the first user message and prepend context
-            for i, msg in enumerate(augmented_data):
-                if msg.get('role') == 'user':
-                    augmented_data[i]['content'] = (
-                        context_str + "\n\n" + msg['content']
-                    )
-                    break
-            else:
-                # No user message found, insert as system message
-                augmented_data.insert(0, {
-                    'role': 'system',
-                    'content': context_str
-                })
+            if self.system_prompt:
+                system_msg = {'role': 'system', 'content': self.system_prompt}
+                if augmented_data and augmented_data[0].get('role') == 'system':
+                    augmented_data[0]['content'] = self.system_prompt + "\n\n" + augmented_data[0]['content']
+                else:
+                    augmented_data.insert(0, system_msg)
+            
+            if context_str:
+                for i, msg in enumerate(augmented_data):
+                    if msg.get('role') == 'user':
+                        augmented_data[i]['content'] = context_str + "\n\n" + msg['content']
+                        break
+                else:
+                    if not self.system_prompt:
+                        augmented_data.insert(0, {'role': 'system', 'content': context_str})
+                    else:
+                        augmented_data[0]['content'] += "\n\n" + context_str
             
             return augmented_data
         
-        # Handle raw string format
         elif isinstance(prompt_data, str):
-            return context_str + "\n\n" + prompt_data
+            parts = []
+            if self.system_prompt:
+                parts.append(self.system_prompt)
+            if context_str:
+                parts.append(context_str)
+            parts.append(prompt_data)
+            return "\n\n".join(parts)
         
-        # Unknown format, return as-is
         else:
             logger.warning(
                 f"Agent {self.agent_id}: Unknown prompt_data type {type(prompt_data)}, "
-                "cannot inject context"
+                "cannot inject context or system prompt"
             )
             return prompt_data
         

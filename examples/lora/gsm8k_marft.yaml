@@ -5,6 +5,13 @@ trial_name: trial0
 n_agents: 2
 agent_interaction_mode: sequential  # or parallel for MAPPO
 
+# Agent-specific profiles (optional)
+agent_profiles:
+  - agent_id: 0
+    system_prompt: "You are a Reasoner. Your role is to analyze the problem step by step, provide chain-of-thought reasoning, and explain the approach to solve it. Focus on breaking down the problem and showing your thinking process."
+  - agent_id: 1
+    system_prompt: "You are an Actor. Your role is to perform the actual calculations based on the reasoning provided, and give the final numerical answer. Focus on accurate computation and presenting the result clearly."
+
 seed: 1
 total_train_epochs: 10
 tokenizer_path: ${actor.path}

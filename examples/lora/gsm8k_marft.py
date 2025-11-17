@@ -91,7 +91,6 @@ class MultiAgentSystem:
     
     def _initialize_agents(self):
         """Initialize all agents' actor, critic, rollout engine, workflow."""
-        # ✅ Read SGLang configuration from environment
         base_port = int(os.getenv("SGLANG_BASE_PORT", "17987"))
         sglang_host = os.getenv("SGLANG_HOST", "localhost")
         
@@ -99,6 +98,9 @@ class MultiAgentSystem:
             f"Initializing {self.n_agents} agents with SGLang servers at "
             f"{sglang_host}:{base_port}..{base_port + self.n_agents - 1}"
         )
+        
+        agent_profiles = self.config.get("agent_profiles", [])
+        agent_profiles_dict = {p.get("agent_id"): p for p in agent_profiles}
         
         for agent_id in range(self.n_agents):
             agent_config = deepcopy(self.config)
@@ -110,28 +112,26 @@ class MultiAgentSystem:
             agent_config.recover.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             agent_config.evaluator.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             
-            # Actor
+            agent_profile = agent_profiles_dict.get(agent_id, {})
+            system_prompt = agent_profile.get("system_prompt", None)
+            
             actor = FSDPMAPPOActor(config=agent_config.actor)
             actor.create_process_group(parallel_strategy=self.parallel_strategy)
             
-            # Critic
             critic = FSDPPPOCritic(config=agent_config.critic)
             critic.create_process_group(parallel_strategy=self.parallel_strategy)
             
-            # Rollout engine - pass addr directly to initialize()
             rollout = RemoteSGLangEngine(agent_config.rollout)
             agent_addr = f"{sglang_host}:{base_port + agent_id}"
             rollout.initialize(
-                addr=agent_addr,  # ← Direct address specification
+                addr=agent_addr,
                 train_data_parallel_size=1,
             )
             
-            # Eval rollout engine - separate instance for evaluation
             eval_rollout = RemoteSGLangEngine(deepcopy(agent_config.rollout))
             eval_rollout.config.max_head_offpolicyness = int(1e12)
             eval_rollout.initialize(addr=agent_addr)
             
-            # Multi-agent workflow with context support
             workflow = MultiAgentRLVRWorkflow(
                 agent_id=agent_id,
                 reward_fn=gsm8k_reward_fn,
@@ -139,13 +139,13 @@ class MultiAgentSystem:
                 tokenizer=self.tokenizer,
                 enable_thinking=False,
                 interaction_mode=self.interaction_mode,
+                system_prompt=system_prompt,
                 dump_dir=os.path.join(
                     StatsLogger.get_log_path(agent_config.stats_logger),
                     f"agent_{agent_id}/generated"
                 ),
             )
             
-            # Eval workflow with lower temperature for more deterministic evaluation
             eval_workflow = MultiAgentRLVRWorkflow(
                 agent_id=agent_id,
                 reward_fn=gsm8k_reward_fn,
@@ -153,6 +153,7 @@ class MultiAgentSystem:
                 tokenizer=self.tokenizer,
                 enable_thinking=False,
                 interaction_mode=self.interaction_mode,
+                system_prompt=system_prompt,
                 rollout_stat_scope=f"agent{agent_id}-eval-rollout",
                 dump_dir=os.path.join(
                     StatsLogger.get_log_path(agent_config.stats_logger),
@@ -160,22 +161,16 @@ class MultiAgentSystem:
                 ),
             )
             
-            # Weight update meta：使用 agent-specific experiment_name
             weight_update_meta = WeightUpdateMeta.from_disk(
-                agent_config.actor.experiment_name,  # agent-specific
+                agent_config.actor.experiment_name,
                 agent_config.actor.trial_name,
                 agent_config.saver.fileroot,
                 use_lora=True,
             )
             
-            # Saver
-            saver = Saver(agent_config.saver, None)  # ft_spec set later
+            saver = Saver(agent_config.saver, None)
             
-            # Evaluator
-            evaluator = Evaluator(agent_config.evaluator, None)  # ft_spec set later
-            
-            # Recovery handler
-            recover_handler = RecoverHandler(agent_config.recover, None)  # ft_spec set later
+            evaluator = Evaluator(agent_config.evaluator, None)
             
             self.agents.append({
                 'id': agent_id,
@@ -189,10 +184,13 @@ class MultiAgentSystem:
                 'weight_update_meta': weight_update_meta,
                 'saver': saver,
                 'evaluator': evaluator,
-                'recover_handler': recover_handler,
+                'recover_handler': None,
             })
             
-            logger.info(f"Initialized agent {agent_id}")
+            logger.info(
+                f"Initialized agent {agent_id}"
+                f"{f' with system_prompt' if system_prompt else ''}"
+            )
     
     def finalize_initialization(self, ft_spec: FinetuneSpec):
         """Complete initialization after obtaining ft_spec."""
@@ -202,7 +200,8 @@ class MultiAgentSystem:
             agent['critic'].initialize(None, ft_spec)
             agent['saver'].ft_spec = ft_spec
             agent['evaluator'].ft_spec = ft_spec
-            agent['recover_handler'].ft_spec = ft_spec
+            # Create RecoverHandler now that we have ft_spec
+            agent['recover_handler'] = RecoverHandler(agent['config'].recover, ft_spec)
     
     def load_recovery_info(self, train_dataloader):
         """
