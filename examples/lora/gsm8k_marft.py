@@ -23,7 +23,6 @@ from areal.platforms import current_platform
 from areal.utils import seeding, stats_tracker
 from areal.utils.data import (
     broadcast_tensor_container,
-    concat_padded_tensors,
     cycle_dataloader,
     get_batch_size,
     tensor_container_to,
@@ -84,6 +83,7 @@ class MultiAgentSystem:
         self.tokenizer = load_hf_tokenizer(config.tokenizer_path)
         self.allocation_mode = AllocationMode.from_str(config.allocation_mode)
         self.parallel_strategy = self.allocation_mode.train
+        self.stats_logger = None  # Will be set in main()
         
         # Per-agent components
         self.agents = []
@@ -174,6 +174,9 @@ class MultiAgentSystem:
             # Evaluator
             evaluator = Evaluator(agent_config.evaluator, None)  # ft_spec set later
             
+            # Recovery handler
+            recover_handler = RecoverHandler(agent_config.recover, None)  # ft_spec set later
+            
             self.agents.append({
                 'id': agent_id,
                 'config': agent_config,
@@ -186,6 +189,7 @@ class MultiAgentSystem:
                 'weight_update_meta': weight_update_meta,
                 'saver': saver,
                 'evaluator': evaluator,
+                'recover_handler': recover_handler,
             })
             
             logger.info(f"Initialized agent {agent_id}")
@@ -198,6 +202,42 @@ class MultiAgentSystem:
             agent['critic'].initialize(None, ft_spec)
             agent['saver'].ft_spec = ft_spec
             agent['evaluator'].ft_spec = ft_spec
+            agent['recover_handler'].ft_spec = ft_spec
+    
+    def load_recovery_info(self, train_dataloader):
+        """
+        Load recovery information for all agents.
+        Returns the maximum start_step among all agents to ensure consistency.
+        """
+        start_steps = []
+        for agent in self.agents:
+            agent_id = agent['id']
+            logger.info(f"Loading recovery info for agent {agent_id}...")
+            recover_info = agent['recover_handler'].load(
+                agent['actor'],
+                agent['saver'],
+                agent['evaluator'],
+                self.stats_logger,  # Use shared stats logger
+                train_dataloader,
+                inference_engine=agent['rollout'],
+                weight_update_meta=agent['weight_update_meta'],
+            )
+            step = (
+                recover_info.last_step_info.next().global_step
+                if recover_info is not None
+                else 0
+            )
+            start_steps.append(step)
+            logger.info(f"Agent {agent_id} will start from step {step}")
+        
+        # Use the maximum start step to ensure all agents are synchronized
+        max_start_step = max(start_steps) if start_steps else 0
+        if len(set(start_steps)) > 1:
+            logger.warning(
+                f"Agents have different start steps {start_steps}. "
+                f"Using max step {max_start_step} for consistency."
+            )
+        return max_start_step
         
     def joint_rollout(self, data_batch: list[dict]) -> list[dict]:
         """Joint rollout - only rank 0 does rollout, all ranks participate in broadcast."""
@@ -379,12 +419,28 @@ class MultiAgentSystem:
                     agent['saver'].save(
                         agent['actor'], epoch, step, global_step,
                         tokenizer=self.tokenizer,
-                        name=f"actor_agent{agent['id']}"
+                        name=f"actor_agent{agent_id}"
                     )
                     agent['saver'].save(
                         agent['critic'], epoch, step, global_step,
                         tokenizer=self.tokenizer,
-                        name=f"critic_agent{agent['id']}"
+                        name=f"critic_agent{agent_id}"
+                    )
+    
+    def dump_recovery_info(self, step_info, train_dataloader):
+        """Dump recovery information for all agents."""
+        for agent in self.agents:
+            agent_id = agent['id']
+            with stats_tracker.scope(f"agent{agent_id}"):
+                with stats_tracker.record_timing(f"checkpoint_for_recover"):
+                    agent['recover_handler'].dump(
+                        agent['actor'],
+                        step_info,
+                        agent['saver'],
+                        agent['evaluator'],
+                        self.stats_logger,  # Use shared stats logger
+                        train_dataloader,
+                        tokenizer=self.tokenizer,
                     )
     
     def evaluate(self, valid_dataloader, epoch: int, step: int, global_step: int, force_run: bool = False):
@@ -405,7 +461,7 @@ class MultiAgentSystem:
         """
         def evaluate_fn():
             if dist.get_rank() == 0:
-                # ✅ Sequential evaluation: agents process data one after another
+                # Sequential evaluation: agents process data one after another
                 for data_batch in valid_dataloader:
                     # Each data_batch is a list of samples
                     for agent_idx, agent in enumerate(self.agents):
@@ -425,7 +481,7 @@ class MultiAgentSystem:
             dist.barrier(device_ids=[self.agents[0]['actor'].device.index])
             current_platform.synchronize()
         
-        # ✅ Run evaluation once for all agents (not per-agent)
+        # Run evaluation once for all agents (not per-agent)
         with stats_tracker.record_timing("eval"):
             if force_run:
                 # Bypass frequency control for initial evaluation
@@ -446,7 +502,6 @@ class MultiAgentSystem:
             agent['critic'].destroy()
             agent['actor'].destroy()
         
-        # ✅ 显式销毁 NCCL 进程组
         if dist.is_initialized():
             dist.destroy_process_group()
             logger.info("NCCL process group destroyed")
@@ -506,27 +561,36 @@ def main(args):
     stats_logger = StatsLogger(config, ft_spec)
     evaluator = Evaluator(config.evaluator, ft_spec)
     
+    # Set shared stats_logger reference for recovery
+    ma_system.stats_logger = stats_logger
+    
+    # Load recovery information for all agents
+    start_step = ma_system.load_recovery_info(train_dataloader)
+    logger.info(f"Training will start from step {start_step}")
+    
     # Training loop
     total_epochs = config.total_train_epochs
     steps_per_epoch = len(train_dataloader)
     max_steps = total_epochs * steps_per_epoch
     data_generator = cycle_dataloader(train_dataloader)
     
-    # Initial evaluation at step 0 (before any training)
-    logger.info("Running initial evaluation at step 0 before training...")
-    ma_system.evaluate(valid_dataloader, epoch=0, step=0, global_step=0, force_run=True)
+    # Initial evaluation at step 0 (only if starting from scratch)
+    if start_step == 0:
+        logger.info("Running initial evaluation at step 0 before training...")
+        ma_system.evaluate(valid_dataloader, epoch=0, step=0, global_step=0, force_run=True)
+        
+        dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
+        current_platform.synchronize()
     
-    dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
-    current_platform.synchronize()
+    # Export initial evaluation stats (only if starting from scratch)
+    if start_step == 0:
+        initial_stats = stats_tracker.export_all(
+            reduce_group=ma_system.agents[0]['actor'].data_parallel_group
+        )
+        stats_logger.commit(epoch=0, step=0, global_step=0, data=initial_stats)
     
-    # Export initial evaluation stats
-    initial_stats = stats_tracker.export_all(
-        reduce_group=ma_system.agents[0]['actor'].data_parallel_group
-    )
-    stats_logger.commit(epoch=0, step=0, global_step=0, data=initial_stats)
-    
-    logger.info("Starting training loop...")
-    for global_step in range(max_steps):
+    logger.info(f"Starting training loop from step {start_step}...")
+    for global_step in range(start_step, max_steps):
         epoch = global_step // steps_per_epoch
         step = global_step % steps_per_epoch
         
@@ -551,6 +615,15 @@ def main(args):
         ma_system.update_weights(global_step)
         
         ma_system.save_checkpoints(epoch, step, global_step)
+        
+        from areal.api.io_struct import StepInfo
+        step_info = StepInfo(
+            global_step=global_step,
+            epoch=epoch,
+            epoch_step=step,
+            steps_per_epoch=steps_per_epoch,
+        )
+        ma_system.dump_recovery_info(step_info, train_dataloader)
         
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
