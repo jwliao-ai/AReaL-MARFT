@@ -1340,6 +1340,16 @@ class BaseExperimentConfig:
             "Only applies when n_agents > 1."
         },
     )
+    agent_profiles: list[dict[str, Any]] = field(
+        default_factory=list,
+        metadata={
+            "help": "Agent-specific profiles for multi-agent training. "
+            "Each profile is a dict with 'agent_id' and optional 'system_prompt'. "
+            "Example: [{'agent_id': 0, 'system_prompt': 'You are a Reasoner...'}, "
+            "{'agent_id': 1, 'system_prompt': 'You are an Actor...'}]. "
+            "Only applies when n_agents > 1."
+        },
+    )
     train_dataset: DatasetConfig = field(default_factory=DatasetConfig)
     valid_dataset: DatasetConfig | None = field(default=None)
 
