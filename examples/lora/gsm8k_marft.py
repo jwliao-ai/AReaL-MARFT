@@ -99,7 +99,7 @@ class MultiAgentSystem:
             f"{sglang_host}:{base_port}..{base_port + self.n_agents - 1}"
         )
         
-        agent_profiles = self.config.get("agent_profiles", [])
+        agent_profiles = self.config.agent_profiles if self.config.agent_profiles else []
         agent_profiles_dict = {p.get("agent_id"): p for p in agent_profiles}
         
         for agent_id in range(self.n_agents):
@@ -113,7 +113,6 @@ class MultiAgentSystem:
             agent_config.evaluator.experiment_name = f"{self.config.experiment_name}_agent{agent_id}"
             
             agent_profile = agent_profiles_dict.get(agent_id, {})
-            system_prompt = agent_profile.get("system_prompt", None)
             
             actor = FSDPMAPPOActor(config=agent_config.actor)
             actor.create_process_group(parallel_strategy=self.parallel_strategy)
@@ -139,7 +138,7 @@ class MultiAgentSystem:
                 tokenizer=self.tokenizer,
                 enable_thinking=False,
                 interaction_mode=self.interaction_mode,
-                system_prompt=system_prompt,
+                agent_profile=agent_profile,
                 dump_dir=os.path.join(
                     StatsLogger.get_log_path(agent_config.stats_logger),
                     f"agent_{agent_id}/generated"
@@ -153,7 +152,7 @@ class MultiAgentSystem:
                 tokenizer=self.tokenizer,
                 enable_thinking=False,
                 interaction_mode=self.interaction_mode,
-                system_prompt=system_prompt,
+                agent_profile=agent_profile,
                 rollout_stat_scope=f"agent{agent_id}-eval-rollout",
                 dump_dir=os.path.join(
                     StatsLogger.get_log_path(agent_config.stats_logger),
@@ -187,9 +186,10 @@ class MultiAgentSystem:
                 'recover_handler': None,
             })
             
+            agent_name = agent_profile.get("agent_name", f"Agent{agent_id}")
             logger.info(
-                f"Initialized agent {agent_id}"
-                f"{f' with system_prompt' if system_prompt else ''}"
+                f"Initialized agent {agent_id} ('{agent_name}')"
+                f"{' with profile' if agent_profile else ''}"
             )
     
     def finalize_initialization(self, ft_spec: FinetuneSpec):

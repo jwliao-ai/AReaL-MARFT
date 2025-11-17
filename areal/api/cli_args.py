@@ -1344,9 +1344,9 @@ class BaseExperimentConfig:
         default_factory=list,
         metadata={
             "help": "Agent-specific profiles for multi-agent training. "
-            "Each profile is a dict with 'agent_id' and optional 'system_prompt'. "
-            "Example: [{'agent_id': 0, 'system_prompt': 'You are a Reasoner...'}, "
-            "{'agent_id': 1, 'system_prompt': 'You are an Actor...'}]. "
+            "Each profile is a dict with 'agent_id', 'agent_name', and optional 'system_prompt'. "
+            "Example: [{'agent_id': 0, 'agent_name': 'Reasoner', 'system_prompt': '...'}, "
+            "{'agent_id': 1, 'agent_name': 'Actor', 'system_prompt': '...'}]. "
             "Only applies when n_agents > 1."
         },
     )

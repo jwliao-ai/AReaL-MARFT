@@ -61,8 +61,10 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
     
     Attributes:
         agent_id: Unique identifier for this agent (0-indexed)
+        agent_name: Human-readable agent role name (e.g., "Reasoner", "Actor")
         interaction_mode: How agents interact ('parallel', 'sequential', 'communication')
         response_key: Key used to store this agent's response in data dict
+        system_prompt: Agent-specific system prompt for role description
     """
     
     def __init__(
@@ -79,8 +81,8 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             [Any, PreTrainedTokenizerFast, bool], list[int]
         ] = default_get_input_ids_fn,
         data_extract_prompt_fn: Callable[[dict[str, Any]], Any] | None = None,
-        context_format_fn: Callable[[int, list[dict]], str] | None = None,
-        system_prompt: str | None = None,
+        context_format_fn: Callable[[int, str, list[dict]], str] | None = None,
+        agent_profile: dict[str, Any] | None = None,
     ):
         """
         Initialize multi-agent workflow.
@@ -97,7 +99,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             get_input_ids_fn: Custom function to extract input_ids from data
             data_extract_prompt_fn: Custom function to extract prompt from data
             context_format_fn: Custom function to format context from other agents
-            system_prompt: Agent-specific system prompt (e.g., role description)
+            agent_profile: Agent profile dict containing 'agent_name', 'system_prompt', etc.
         """
         if rollout_stat_scope is None:
             rollout_stat_scope = f"agent{agent_id}_rollout"
@@ -120,12 +122,20 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         self.interaction_mode = interaction_mode
         self.response_key = f"agent_{agent_id}_response"
         self.context_format_fn = context_format_fn or self._default_context_format
-        self.system_prompt = system_prompt
+        
+        # Unpack agent profile
+        agent_profile = agent_profile or {}
+        self.agent_name = agent_profile.get("agent_name", f"Agent{agent_id}")
+        self.system_prompt = agent_profile.get("system_prompt", None)
+        
+        # Store full profile for potential future use
+        self.agent_profile = agent_profile
         
         logger.info(
-            f"Initialized Agent {agent_id} with interaction_mode='{interaction_mode}', "
+            f"Initialized Agent {agent_id} ('{self.agent_name}') with "
+            f"interaction_mode='{interaction_mode}', "
             f"response_key='{self.response_key}', "
-            f"system_prompt={'set' if system_prompt else 'not set'}"
+            f"system_prompt={'set' if self.system_prompt else 'not set'}"
         )
     
     def _extract_previous_agent_responses(self, data: dict[str, Any]) -> list[dict]:
@@ -160,92 +170,69 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
                 })
         return context
     
-    def _default_context_format(self, agent_id: int, context: list[dict]) -> str:
+    def _default_context_format(self, agent_id: int, agent_name: str, context: list[dict]) -> str:
         """
         Default formatting for context from other agents.
         
         Args:
             agent_id: Current agent's ID
+            agent_name: Current agent's name
             context: List of context dicts from other agents
         
         Returns:
-            Formatted context string to prepend to prompt.
+            Formatted context string to append after user query.
             Returns empty string for parallel mode.
         """
-        # Parallel mode: no context sharing
         if self.interaction_mode == "parallel":
             return ""
         
-        # Sequential mode: share previous agents' outputs
         if self.interaction_mode == "sequential":
             if not context:
-                return f"You are Agent_{agent_id}.\n\nNow, you answer the problem:"
+                return ""
             
-            lines = [f"You are Agent_{agent_id}.\n"]
-            lines.append("Below are the answers other agents have given:")
-            
+            lines = ["\n--- Previous agents' responses ---"]
             for ctx in context:
-                prev_agent_id = ctx['agent_id']
+                prev_agent_name = ctx.get('agent_name', f"Agent{ctx['agent_id']}")
                 completion = ctx.get('completion', '')
-                lines.append(f"Agent_{prev_agent_id}: {completion}\n")
+                lines.append(f"{prev_agent_name}: {completion}")
             
-            lines.append("Now, you answer the problem:")
-            
+            lines.append(f"--- Now it's your turn, {agent_name} ---")
             return "\n".join(lines)
         
-        # Communication mode: placeholder for future implementation
         if self.interaction_mode == "communication":
             logger.warning(
                 f"Agent {agent_id}: 'communication' mode not yet implemented, "
                 "falling back to sequential format"
             )
-            # TODO(agent): Implement bidirectional message passing
-            return self._format_sequential_context(agent_id, context)
+            return ""
         
-        # Unknown mode: log warning and return empty
         logger.warning(
             f"Agent {agent_id}: Unknown interaction_mode '{self.interaction_mode}', "
             "no context will be provided"
         )
         return ""
     
-    def _format_sequential_context(self, agent_id: int, context: list[dict]) -> str:
-        """Helper to format sequential context (extracted for reuse)."""
-        if not context:
-            return f"You are Agent_{agent_id}.\n\nNow, you answer the problem:"
-        
-        lines = [f"You are Agent_{agent_id}.\n"]
-        lines.append("Below are the answers other agents have given:")
-        
-        for ctx in context:
-            prev_agent_id = ctx['agent_id']
-            completion = ctx.get('completion', '')
-            lines.append(f"Agent_{prev_agent_id}: {completion}\n")
-        
-        lines.append("Now, you answer the problem:")
-        
-        return "\n".join(lines)
-    
     def _augment_prompt_with_context(
         self, prompt_data: Any, context: list[dict]
     ) -> Any:
         """
-        Augment the prompt with context from other agents and system prompt.
+        Augment the prompt with system prompt and context from other agents.
+        
+        Order: system_prompt -> user query -> context (other agents' responses)
         
         Args:
             prompt_data: Original prompt data (typically a list of message dicts)
             context: List of context dicts from previous agents
         
         Returns:
-            Augmented prompt data with context and system prompt injected
+            Augmented prompt data with system prompt and context injected
         """
-        context_str = ""
-        if context and self.interaction_mode != "parallel":
-            context_str = self.context_format_fn(self.agent_id, context)
+        context_str = self.context_format_fn(self.agent_id, self.agent_name, context)
         
         if isinstance(prompt_data, list) and prompt_data:
             augmented_data = deepcopy(prompt_data)
             
+            # Step 1: Add system prompt at the beginning
             if self.system_prompt:
                 system_msg = {'role': 'system', 'content': self.system_prompt}
                 if augmented_data and augmented_data[0].get('role') == 'system':
@@ -253,16 +240,15 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
                 else:
                     augmented_data.insert(0, system_msg)
             
+            # Step 2: Append context after the last user message
             if context_str:
-                for i, msg in enumerate(augmented_data):
-                    if msg.get('role') == 'user':
-                        augmented_data[i]['content'] = context_str + "\n\n" + msg['content']
+                for i in range(len(augmented_data) - 1, -1, -1):
+                    if augmented_data[i].get('role') == 'user':
+                        augmented_data[i]['content'] = augmented_data[i]['content'] + context_str
                         break
                 else:
-                    if not self.system_prompt:
-                        augmented_data.insert(0, {'role': 'system', 'content': context_str})
-                    else:
-                        augmented_data[0]['content'] += "\n\n" + context_str
+                    # No user message found, append as a new user message
+                    augmented_data.append({'role': 'user', 'content': context_str})
             
             return augmented_data
         
@@ -270,9 +256,9 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             parts = []
             if self.system_prompt:
                 parts.append(self.system_prompt)
+            parts.append(prompt_data)
             if context_str:
                 parts.append(context_str)
-            parts.append(prompt_data)
             return "\n\n".join(parts)
         
         else:
@@ -390,13 +376,15 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         # 6. Write this agent's response back to data for next agent
         if resps and completions_strs:
             data[self.response_key] = {
+                "agent_id": self.agent_id,
+                "agent_name": self.agent_name,
                 "completion": completions_strs[0],
                 "reward": sum(rewards) / len(rewards),
                 "prompt": prompt_str,
                 "response_ids": resps[0].output_tokens,
             }
             logger.debug(
-                f"Agent {self.agent_id} wrote response to data['{self.response_key}']"
+                f"Agent {self.agent_id} ('{self.agent_name}') wrote response to data['{self.response_key}']"
             )
         
         # 7. Dump to file if enabled
