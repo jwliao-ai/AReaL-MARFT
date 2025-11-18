@@ -5,8 +5,11 @@ from copy import deepcopy
 import torch.distributed as dist
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from recipe.AEnt.actor import FSDPAEntPPOActor
+from recipe.AEnt.aent_args import AEntGRPOConfig
+
 from areal.api.alloc_mode import AllocationMode
-from areal.api.cli_args import GRPOConfig, load_expr_config
+from areal.api.cli_args import load_expr_config
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
 from areal.dataset import get_custom_dataset
 from areal.engine.ppo.actor import FSDPPPOActor
@@ -15,7 +18,6 @@ from areal.platforms import current_platform
 from areal.utils import seeding, stats_tracker
 from areal.utils.data import (
     broadcast_tensor_container,
-    cycle_dataloader,
     tensor_container_to,
 )
 from areal.utils.device import log_gpu_stats
@@ -25,8 +27,6 @@ from areal.utils.recover import RecoverHandler
 from areal.utils.saver import Saver
 from areal.utils.stats_logger import StatsLogger
 from areal.workflow.rlvr import RLVRWorkflow
-from recipe.AEnt.actor import FSDPAEntPPOActor
-from recipe.AEnt.aent_args import AEntGRPOConfig
 
 
 def gsm8k_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **kwargs):
@@ -162,7 +162,6 @@ def main(args):
     steps_per_epoch = len(train_dataloader)
     max_steps = total_epochs * steps_per_epoch
 
-    data_generator = cycle_dataloader(train_dataloader)
     for global_step in range(start_step, max_steps):
         epoch = global_step // steps_per_epoch
         step = global_step % steps_per_epoch
@@ -176,18 +175,11 @@ def main(args):
         with stats_tracker.record_timing("rollout"):
             batch = None
             if actor.is_data_parallel_head():
-                if config.async_training:
-                    batch = rollout.prepare_batch(
-                        train_dataloader,
-                        workflow=workflow,
-                        should_accept_fn=lambda sample: True,
-                    )
-                else:
-                    batch = rollout.rollout_batch(
-                        next(data_generator),
-                        workflow=workflow,
-                        should_accept_fn=lambda sample: True,
-                    )
+                batch = rollout.prepare_batch(
+                    train_dataloader,
+                    workflow=workflow,
+                    should_accept_fn=lambda sample: True,
+                )
                 batch = tensor_container_to(batch, actor.device)
             batch = broadcast_tensor_container(
                 batch,

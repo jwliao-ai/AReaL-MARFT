@@ -9,7 +9,7 @@ from typing import Any
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from areal.api.cli_args import InferenceEngineConfig, vLLMConfig
-from areal.api.engine_api import InferenceEngine, NoResult
+from areal.api.engine_api import InferenceEngine
 from areal.api.io_struct import (
     HttpGenerationResult,
     HttpRequest,
@@ -235,7 +235,7 @@ class RemotevLLMEngine(InferenceEngine):
 
     def wait(
         self, count: int, timeout: float | None = None, raise_timeout: bool = True
-    ) -> dict[str, Any] | NoResult:
+    ) -> dict[str, Any]:
         """Wait for a specified number of requests to complete."""
         return self._engine.wait(count, timeout, raise_timeout)
 
@@ -244,12 +244,13 @@ class RemotevLLMEngine(InferenceEngine):
         data: list[dict[str, Any]],
         workflow: RolloutWorkflow | type[RolloutWorkflow] | str,
         workflow_kwargs: dict[str, Any] | None = None,
-        should_accept_fn: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> dict[str, Any]:
-        """Submit a batch of requests and wait for results."""
-        return self._engine.rollout_batch(
-            data, workflow, workflow_kwargs, should_accept_fn
-        )
+        """Submit a batch of requests and wait for results.
+
+        This method does not support asynchronous rollout and should be used for offline
+        data collection or debugging, not in production experiments.
+        """
+        return self._engine.rollout_batch(data, workflow, workflow_kwargs)
 
     def prepare_batch(
         self,
