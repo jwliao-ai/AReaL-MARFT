@@ -1350,6 +1350,15 @@ class BaseExperimentConfig:
             "Only applies when n_agents > 1."
         },
     )
+    share_critic: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether multiple agents share a single critic in multi-agent training. "
+            "If True, all agents use the same critic network. "
+            "If False, each agent has its own independent critic. "
+            "Only applies when n_agents > 1."
+        },
+    )
     train_dataset: DatasetConfig = field(default_factory=DatasetConfig)
     valid_dataset: DatasetConfig | None = field(default=None)
 

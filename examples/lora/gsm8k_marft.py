@@ -77,6 +77,7 @@ class MultiAgentSystem:
         self.config = config
         self.n_agents = config.n_agents
         self.interaction_mode = config.agent_interaction_mode
+        self.share_critic = config.share_critic
         self.rank = int(os.getenv("RANK", "0"))
         
         # Shared components
@@ -84,6 +85,9 @@ class MultiAgentSystem:
         self.allocation_mode = AllocationMode.from_str(config.allocation_mode)
         self.parallel_strategy = self.allocation_mode.train
         self.stats_logger = None  # Will be set in main()
+        
+        # Shared critic (if share_critic=True)
+        self.shared_critic = None
         
         # Per-agent components
         self.agents = []
@@ -98,6 +102,14 @@ class MultiAgentSystem:
             f"Initializing {self.n_agents} agents with SGLang servers at "
             f"{sglang_host}:{base_port}..{base_port + self.n_agents - 1}"
         )
+        
+        # Initialize shared critic if share_critic=True
+        if self.share_critic:
+            logger.info("Creating shared critic for all agents...")
+            shared_critic_config = deepcopy(self.config.critic)
+            shared_critic_config.experiment_name = f"{self.config.experiment_name}_shared"
+            self.shared_critic = FSDPPPOCritic(config=shared_critic_config)
+            self.shared_critic.create_process_group(parallel_strategy=self.parallel_strategy)
         
         agent_profiles = self.config.agent_profiles if self.config.agent_profiles else []
         agent_profiles_dict = {p.get("agent_id"): p for p in agent_profiles}
@@ -114,11 +126,14 @@ class MultiAgentSystem:
             
             agent_profile = agent_profiles_dict.get(agent_id, {})
             
-            actor = FSDPMAPPOActor(config=agent_config.actor)
+            actor = FSDPMAPPOActor(config=agent_config.actor) if self.interaction_mode == "sequential" else FSDPPPOActor(config=agent_config.actor)
             actor.create_process_group(parallel_strategy=self.parallel_strategy)
             
-            critic = FSDPPPOCritic(config=agent_config.critic)
-            critic.create_process_group(parallel_strategy=self.parallel_strategy)
+            if self.share_critic:
+                critic = self.shared_critic
+            else:
+                critic = FSDPPPOCritic(config=agent_config.critic)
+                critic.create_process_group(parallel_strategy=self.parallel_strategy)
             
             rollout = RemoteSGLangEngine(agent_config.rollout)
             agent_addr = f"{sglang_host}:{base_port + agent_id}"
@@ -194,13 +209,16 @@ class MultiAgentSystem:
     
     def finalize_initialization(self, ft_spec: FinetuneSpec):
         """Complete initialization after obtaining ft_spec."""
+        if self.shared_critic is not None:
+            self.shared_critic.initialize(None, ft_spec)
+        
         for agent in self.agents:
             agent['actor'].initialize(None, ft_spec)
             agent['actor'].connect_engine(agent['rollout'], agent['weight_update_meta'])
-            agent['critic'].initialize(None, ft_spec)
+            if not self.share_critic:
+                agent['critic'].initialize(None, ft_spec)
             agent['saver'].ft_spec = ft_spec
             agent['evaluator'].ft_spec = ft_spec
-            # Create RecoverHandler now that we have ft_spec
             agent['recover_handler'] = RecoverHandler(agent['config'].recover, ft_spec)
     
     def load_recovery_info(self, train_dataloader):
@@ -211,7 +229,10 @@ class MultiAgentSystem:
         start_steps = []
         for agent in self.agents:
             agent_id = agent['id']
-            logger.info(f"Loading recovery info for agent {agent_id}...")
+            logger.info(
+                f"Loading recovery info for agent {agent_id} "
+                f"(experiment_name={agent['config'].recover.experiment_name})..."
+            )
             recover_info = agent['recover_handler'].load(
                 agent['actor'],
                 agent['saver'],
@@ -275,13 +296,7 @@ class MultiAgentSystem:
                                     for k, v in batch.items()
                                 }
                                 logger.info(f"Agent {agent_idx} batch reordered from {indices[:3].tolist()} to {batch['__global_idx__'][:3].tolist()}")
-                            # # we can keep the global_idx for verification
-                            # del batch['__global_idx__']
-                            
-                        # # not working because redistribute will change the order still
-                        # # so we need to get the unified data, redistribute and unpack the unified data batch
-                        # batch = bcast_and_split_from_rank0(batch, granularity=self.config.actor.group_size)
-                        agent_batches.append(batch) # agent0: [8,486]; agent1: [8,517]
+                        agent_batches.append(batch)
 
             for agent_idx, batch in enumerate(agent_batches):
                 for key, value in batch.items():
@@ -299,10 +314,6 @@ class MultiAgentSystem:
                 if key.startswith(prefix):
                     original_key = key[len(prefix):]
                     agent_batch[original_key] = unified_batch[key]
-            
-            # # we can keep the global idx for verification
-            # if '__global_idx__' in agent_batch:
-            #     del agent_batch['__global_idx__']
                 
             rollout_batches.append(agent_batch)
             logger.info(f"✅ Agent {agent_idx} batch unpacked with {len(agent_batch)} fields on rank {dist.get_rank()}")
@@ -345,7 +356,8 @@ class MultiAgentSystem:
             
             with stats_tracker.scope(f"agent{agent_id}"):
                 with stats_tracker.record_timing(f"critic_values"):
-                    values = agent['critic'].compute_values(batch)
+                    critic = self.shared_critic if self.share_critic else agent['critic']
+                    values = critic.compute_values(batch)
                     batch['values'] = values
                     log_gpu_stats(f"agent{agent_id} critic values")
 
@@ -372,17 +384,27 @@ class MultiAgentSystem:
         for agent, batch in zip(self.agents, batches):
             agent_id = agent['id']
             
-            # ✅ Use scope to prefix all stats from actor/critic
             with stats_tracker.scope(f"agent{agent_id}"):
                 with stats_tracker.record_timing(f"ppo_update"):
                     agent['actor'].ppo_update(batch)
                     agent['actor'].step_lr_scheduler()
                     log_gpu_stats(f"agent{agent_id} ppo actor update")
-                
+        
+        if self.share_critic:
+            with stats_tracker.scope("shared"):
                 with stats_tracker.record_timing(f"critic_update"):
-                    agent['critic'].ppo_update(batch)
-                    agent['critic'].step_lr_scheduler()
-                    log_gpu_stats(f"agent{agent_id} ppo critic update")
+                    for batch in batches:
+                        self.shared_critic.ppo_update(batch)
+                    self.shared_critic.step_lr_scheduler()
+                    log_gpu_stats("shared critic update")
+        else:
+            for agent, batch in zip(self.agents, batches):
+                agent_id = agent['id']
+                with stats_tracker.scope(f"agent{agent_id}"):
+                    with stats_tracker.record_timing(f"critic_update"):
+                        agent['critic'].ppo_update(batch)
+                        agent['critic'].step_lr_scheduler()
+                        log_gpu_stats(f"agent{agent_id} ppo critic update")
     
     def update_weights(self, global_step: int):
         """Synchronize all agents' weight versions."""
@@ -396,7 +418,8 @@ class MultiAgentSystem:
                     try:
                         agent['actor'].update_weights(agent['weight_update_meta'])
                         agent['actor'].set_version(global_step + 1)
-                        agent['critic'].set_version(global_step + 1)
+                        if not self.share_critic:
+                            agent['critic'].set_version(global_step + 1)
                         agent['rollout'].set_version(global_step + 1)
                         agent['eval_rollout'].set_version(global_step + 1)
                     except Exception as e:
@@ -406,11 +429,23 @@ class MultiAgentSystem:
                         )
                         raise
         
+        if self.share_critic:
+            self.shared_critic.set_version(global_step + 1)
+        
         for agent in self.agents:
             agent['rollout'].resume()
             
     def save_checkpoints(self, epoch: int, step: int, global_step: int):
         """Save all agents' checkpoints."""
+        if self.share_critic:
+            with stats_tracker.scope("shared"):
+                with stats_tracker.record_timing(f"save"):
+                    self.agents[0]['saver'].save(
+                        self.shared_critic, epoch, step, global_step,
+                        tokenizer=self.tokenizer,
+                        name="critic_shared"
+                    )
+        
         for agent in self.agents:
             agent_id = agent['id']
             with stats_tracker.scope(f"agent{agent_id}"):
@@ -420,11 +455,12 @@ class MultiAgentSystem:
                         tokenizer=self.tokenizer,
                         name=f"actor_agent{agent_id}"
                     )
-                    agent['saver'].save(
-                        agent['critic'], epoch, step, global_step,
-                        tokenizer=self.tokenizer,
-                        name=f"critic_agent{agent_id}"
-                    )
+                    if not self.share_critic:
+                        agent['saver'].save(
+                            agent['critic'], epoch, step, global_step,
+                            tokenizer=self.tokenizer,
+                            name=f"critic_agent{agent_id}"
+                        )
     
     def dump_recovery_info(self, step_info, train_dataloader):
         """Dump recovery information for all agents."""
@@ -498,8 +534,14 @@ class MultiAgentSystem:
         for agent in self.agents:
             agent['eval_rollout'].destroy()
             agent['rollout'].destroy()
-            agent['critic'].destroy()
+            # Only destroy per-agent critic if not using shared critic
+            if not self.share_critic:
+                agent['critic'].destroy()
             agent['actor'].destroy()
+        
+        # Destroy shared critic if it exists
+        if self.shared_critic is not None:
+            self.shared_critic.destroy()
         
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -615,7 +657,6 @@ def main(args):
         
         ma_system.save_checkpoints(epoch, step, global_step)
         
-        from areal.api.io_struct import StepInfo
         step_info = StepInfo(
             global_step=global_step,
             epoch=epoch,
@@ -633,7 +674,6 @@ def main(args):
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
         
-        # Export all statistics (with agent-specific scopes automatically included)
         stats = stats_tracker.export_all(
             reduce_group=ma_system.agents[0]['actor'].data_parallel_group
         )

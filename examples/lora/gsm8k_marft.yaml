@@ -4,13 +4,16 @@ trial_name: trial0
 # Multi-agent settings
 n_agents: 2
 agent_interaction_mode: sequential  # or parallel for MAPPO
+share_critic: true
 
 # Agent-specific profiles (optional)
 agent_profiles:
   - agent_id: 0
-    system_prompt: "You are a Reasoner. Your role is to analyze the problem step by step, provide chain-of-thought reasoning, and explain the approach to solve it. Focus on breaking down the problem and showing your thinking process."
+    agent_name: Teacher
+    system_prompt: "You are a math teacher specialized in solving mathematical problems, you need to teach a weaker agent with minimal capability in math how to solve a problem step-by-step. Your task is to provide a high-level solution plan for the given problem without any detailed calculations, in order to guide a low-level math solving agent to solve the problem. \nYou can not directly answer the question. You'll be punished if you include any answer in your response."
   - agent_id: 1
-    system_prompt: "You are an Actor. Your role is to perform the actual calculations based on the reasoning provided, and give the final numerical answer. Focus on accurate computation and presenting the result clearly."
+    agent_name: Student
+    system_prompt: "You are a math student tasked with solving problems step by step. Follow the instructions provided by the Teacher precisely, showing all reasoning, calculations and intermediate results. Present the final answer within \\boxed{}."
 
 seed: 1
 total_train_epochs: 10
@@ -26,7 +29,7 @@ cluster:
     nfs_record_root: /tmp/areal/name_resolve
 
 # all agents share resources allocation mode
-allocation_mode: sglang:d2p1t1+d2p1t1
+allocation_mode: d2p1t1
 
 rollout:
   experiment_name: ${experiment_name}
