@@ -13,7 +13,7 @@ import torch.distributed as dist
 from areal.api.alloc_mode import AllocationMode
 from areal.api.cli_args import PPOConfig, load_expr_config
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
-from areal.core.dist_rollout import ma_redistribute, redistribute_multi_agent
+from areal.core.dist_rollout import ma_redistribute
 from areal.dataset import get_custom_dataset
 from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.ppo.mas_actor import FSDPMAPPOActor
@@ -297,8 +297,10 @@ class MultiAgentSystem:
                                 }
                                 logger.info(f"Agent {agent_idx} batch reordered from {indices[:3].tolist()} to {batch['__global_idx__'][:3].tolist()}")
                         agent_batches.append(batch)
-
+            
+            last_agent_rewards = agent_batches[-1]['rewards']
             for agent_idx, batch in enumerate(agent_batches):
+                batch['rewards'] = last_agent_rewards
                 for key, value in batch.items():
                     unified_batch[f"agent{agent_idx}_{key}"] = value
         
@@ -623,8 +625,6 @@ def main(args):
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
     
-    # Export initial evaluation stats (only if starting from scratch)
-    if start_step == 0:
         initial_stats = stats_tracker.export_all(
             reduce_group=ma_system.agents[0]['actor'].data_parallel_group
         )
@@ -645,8 +645,8 @@ def main(args):
         dist.barrier(device_ids=[ma_system.agents[0]['actor'].device.index])
         current_platform.synchronize()
         
-        with stats_tracker.record_timing("compute_joint_rewards"):
-            ma_system.compute_joint_rewards(batches)
+        # with stats_tracker.record_timing("compute_joint_rewards"):
+        #     ma_system.compute_joint_rewards(batches)
         
         ma_system.joint_training(batches)
         
