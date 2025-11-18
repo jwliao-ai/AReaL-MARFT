@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
     from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
-VALID_DATASETS = ["gsm8k", "clevr_count_70k", "geometry3k", "hh-rlhf", "torl_data"]
+VALID_DATASETS = ["gsm8k", "clevr_count_70k", "geometry3k", "hh-rlhf", "torl_data", "aime"]
 
 logger = logging.getLogger("Dataset")
 
@@ -99,6 +99,26 @@ def _get_custom_dataset(
         from .torl_data import get_torl_data_rl_dataset
 
         return get_torl_data_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "aime" in path and type == "sft":
+        from .aime_1983_2024 import get_aime_sft_dataset
+
+        return get_aime_sft_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "aime" in path and type == "rl":
+        from .aime_1983_2024 import get_aime_rl_dataset
+
+        return get_aime_rl_dataset(
             path=path,
             split=split,
             tokenizer=tokenizer,
