@@ -10,7 +10,17 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
     from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
-VALID_DATASETS = ["gsm8k", "clevr_count_70k", "geometry3k", "hh-rlhf", "torl_data", "aime", "MATH"]
+# Added "math" and "codeforces" to valid datasets
+VALID_DATASETS = [
+    "gsm8k", 
+    "clevr_count_70k", 
+    "geometry3k", 
+    "hh-rlhf", 
+    "torl_data", 
+    "aime", 
+    "MATH", 
+    "codeforces"
+]
 
 logger = logging.getLogger("Dataset")
 
@@ -46,7 +56,6 @@ def _get_custom_dataset(
             **kwargs,
         )
     elif "MATH" in path and type == "sft":
-        # Added support for MATH SFT dataset
         from .MATH import get_math_sft_dataset
 
         return get_math_sft_dataset(
@@ -57,10 +66,29 @@ def _get_custom_dataset(
             **kwargs,
         )
     elif "MATH" in path and type == "rl":
-        # Added support for MATH RL dataset
         from .MATH import get_math_rl_dataset
 
         return get_math_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "codeforces" in path and type == "sft":
+        from .codeforces import get_codeforces_sft_dataset
+
+        return get_codeforces_sft_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "codeforces" in path and type == "rl":
+        from .codeforces import get_codeforces_rl_dataset
+
+        return get_codeforces_rl_dataset(
             path=path,
             split=split,
             tokenizer=tokenizer,
