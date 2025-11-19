@@ -40,7 +40,7 @@ from areal.workflow.marlvr import MultiAgentRLVRWorkflow
 
 logger = getLogger(__name__)
 
-def context_format_fn(self, agent_id: int, agent_name: str, context: list[dict]) -> str:
+def context_format_fn(interaction_mode: str, agent_id: int, agent_name: str, context: list[dict]) -> str:
     """
     Default formatting for context from other agents.
     
@@ -53,10 +53,10 @@ def context_format_fn(self, agent_id: int, agent_name: str, context: list[dict])
         Formatted context string to append after user query.
         Returns empty string for parallel mode.
     """
-    if self.interaction_mode == "parallel":
+    if interaction_mode == "parallel":
         return ""
     
-    if self.interaction_mode == "sequential":
+    if interaction_mode == "sequential":
         if not context:
             return ""
         
@@ -69,7 +69,7 @@ def context_format_fn(self, agent_id: int, agent_name: str, context: list[dict])
         lines.append(f"[END OF TEACHER'S RESPONSE]\nNow it's your turn.")
         return "\n".join(lines)
     
-    if self.interaction_mode == "communication":
+    if interaction_mode == "communication":
         logger.warning(
             f"Agent {agent_id}: 'communication' mode not yet implemented, "
             "falling back to sequential format"
@@ -77,7 +77,7 @@ def context_format_fn(self, agent_id: int, agent_name: str, context: list[dict])
         return ""
     
     logger.warning(
-        f"Agent {agent_id}: Unknown interaction_mode '{self.interaction_mode}', "
+        f"Agent {agent_id}: Unknown interaction_mode '{interaction_mode}', "
         "no context will be provided"
     )
     return ""
@@ -86,11 +86,14 @@ def coding_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **
     from areal.reward.prime_code import compute_score
     res = compute_score(completion=completions, test_cases=answer, continuous=True)
     if isinstance(res, dict):
-        return res
+        return 0.0
     elif isinstance(res, (int, float, bool)):
         return float(res)
     else:
         return float(res[0])
+    
+def coding_reward_fn_dummy(prompt, completions, prompt_ids, completion_ids, answer, **kwargs):
+    return 0.0
 
 def bcast_and_split_from_rank0(unified_batch: dict | None, granularity: int) -> dict:
     """Broadcast batch from rank 0 and split across ranks."""
@@ -193,7 +196,7 @@ class MultiAgentSystem:
             
             workflow = MultiAgentRLVRWorkflow(
                 agent_id=agent_id,
-                reward_fn=coding_reward_fn,
+                reward_fn=coding_reward_fn if agent_id == self.n_agents - 1 else coding_reward_fn_dummy,
                 context_format_fn=context_format_fn,
                 gconfig=agent_config.gconfig,
                 tokenizer=self.tokenizer,
@@ -208,7 +211,7 @@ class MultiAgentSystem:
             
             eval_workflow = MultiAgentRLVRWorkflow(
                 agent_id=agent_id,
-                reward_fn=coding_reward_fn,
+                reward_fn=coding_reward_fn if agent_id == self.n_agents - 1 else coding_reward_fn_dummy,
                 context_format_fn=context_format_fn,
                 gconfig=agent_config.gconfig.new(temperature=0.6),
                 tokenizer=self.tokenizer,
@@ -593,7 +596,7 @@ class MultiAgentSystem:
                 # Bypass frequency control for initial evaluation
                 evaluate_fn()
             else:
-                self.agents[0]['evaluator'].evaluate(
+                self.agents[-1]['evaluator'].evaluate(
                     evaluate_fn,
                     epoch,
                     step,
@@ -623,13 +626,13 @@ def main(args):
     config, _ = load_expr_config(args, PPOConfig)
     config: PPOConfig
     
-    # rank = int(os.getenv("RANK", "0"))
-    # if rank == 0 and os.getenv("DEBUG_CHILD_PROCESS") == "1":
-    #     import debugpy
-    #     debugpy.listen(("0.0.0.0", 5678))
-    #     print(f"⚠️  Waiting for debugger to attach on port 5678...")
-    #     debugpy.wait_for_client()
-    #     print(f"✅ Debugger attached!")
+    rank = int(os.getenv("RANK", "0"))
+    if rank == 0 and os.getenv("DEBUG_CHILD_PROCESS") == "1":
+        import debugpy
+        debugpy.listen(("0.0.0.0", 5678))
+        print(f"⚠️  Waiting for debugger to attach on port 5678...")
+        debugpy.wait_for_client()
+        print(f"✅ Debugger attached!")
         
     rank = int(os.getenv("RANK", "0"))
     seeding.set_random_seed(config.seed, key=f"trainer{rank}")

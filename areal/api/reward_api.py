@@ -72,7 +72,7 @@ class AsyncRewardWrapper:
     def __init__(
         self,
         reward_fn: Callable,
-        timeout_seconds: float = 15,
+        timeout_seconds: float = 120,
         max_workers: int | None = None,
         max_retries: int = 3,
     ):
