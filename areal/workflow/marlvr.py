@@ -190,13 +190,13 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             if not context:
                 return ""
             
-            lines = ["\n--- Previous agents' responses ---"]
+            lines = ["\n[TEACHER'S RESPONSE]"]
             for ctx in context:
                 prev_agent_name = ctx.get('agent_name', f"Agent{ctx['agent_id']}")
                 completion = ctx.get('completion', '')
                 lines.append(f"{prev_agent_name}: {completion}")
             
-            lines.append(f"--- Now it's your turn, {agent_name} ---")
+            lines.append(f"[END OF TEACHER'S RESPONSE]\nNow it's your turn.")
             return "\n".join(lines)
         
         if self.interaction_mode == "communication":
