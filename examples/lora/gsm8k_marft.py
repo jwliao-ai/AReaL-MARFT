@@ -261,28 +261,34 @@ class MultiAgentSystem:
         
     def joint_rollout(self, data_batch: list[dict]) -> list[dict]:
         """Joint rollout - only rank 0 does rollout, all ranks participate in broadcast."""
+        dist.barrier() 
+        
         if dist.get_rank() == 0 and data_batch is not None:
             for idx, sample in enumerate(data_batch):
                 sample['__global_idx__'] = idx
         
-        # because we broadcast only when all agents' rollout data are ready,
-        # so we initialize the unified batch out of the loop.
         agent_batches = None
         unified_batch = {}
         
         if dist.get_rank() == 0:
             agent_batches = []
+            logger.info(f"Rank 0: Starting rollout loop for {self.n_agents} agents.")
+            
             for agent_idx, agent in enumerate(self.agents):
                 with stats_tracker.scope(f"agent{agent_idx}"):
                     with stats_tracker.record_timing("rollout"):
-                        batch = None
-                        logger.info(f"Agent {agent_idx} rollout starting...")
-                        batch = agent['rollout'].rollout_batch(
-                            data_batch,
-                            workflow=agent['workflow'],
-                            should_accept_fn=lambda sample: True,
-                        )
-                        logger.info(f"✅ Agent {agent_idx} rollout done")
+                        logger.info(f"Rank 0: requesting rollout for Agent {agent_idx}...")
+                        try:
+                            batch = agent['rollout'].rollout_batch(
+                                data_batch,
+                                workflow=agent['workflow'],
+                            )
+                        except Exception as e:
+                            logger.error(f"Rank 0: Agent {agent_idx} rollout FAILED with error: {e}")
+                            raise e
+                            
+                        logger.info(f"✅ Rank 0: Agent {agent_idx} rollout done. Moving to GPU...")
+                        
                         batch = tensor_container_to(batch, agent['actor'].device)
                         
                         # recover the order for action tuple collection
@@ -295,31 +301,47 @@ class MultiAgentSystem:
                                     k: v[sort_perm] if torch.is_tensor(v) and v.dim() > 0 else v
                                     for k, v in batch.items()
                                 }
-                                logger.info(f"Agent {agent_idx} batch reordered from {indices[:3].tolist()} to {batch['__global_idx__'][:3].tolist()}")
+                                logger.info(f"Agent {agent_idx} batch reordered.")
                         agent_batches.append(batch)
             
-            last_agent_rewards = agent_batches[-1]['rewards']
-            for agent_idx, batch in enumerate(agent_batches):
-                batch['rewards'] = last_agent_rewards
-                for key, value in batch.items():
-                    unified_batch[f"agent{agent_idx}_{key}"] = value
+            logger.info("Rank 0: All agents rollout finished. Preparing unified batch...")
+            
+            if len(agent_batches) > 0:
+                last_agent_rewards = agent_batches[-1]['rewards']
+                for agent_idx, batch in enumerate(agent_batches):
+                    batch['rewards'] = last_agent_rewards
+                    for key, value in batch.items():
+                        if not torch.is_tensor(value) and not isinstance(value, (int, float)):
+                             pass 
+                        unified_batch[f"agent{agent_idx}_{key}"] = value
+            else:
+                logger.warning("Rank 0: agent_batches is empty!")
+
+        logger.info(f"Rank {dist.get_rank()}: Waiting for pre-broadcast barrier...")
+        dist.barrier()
+        logger.info(f"Rank {dist.get_rank()}: Passed barrier. Starting broadcast...")
+
+        try:
+            if dist.get_rank() == 0:
+                for k, v in unified_batch.items():
+                    if torch.is_tensor(v) and not v.is_contiguous():
+                        unified_batch[k] = v.contiguous()
+
+            unified_batch = bcast_and_split_from_rank0(unified_batch, granularity=self.config.actor.group_size)
+        except Exception as e:
+            logger.error(f"Rank {dist.get_rank()}: Broadcast failed: {e}")
+            raise e
         
-        unified_batch = bcast_and_split_from_rank0(unified_batch, granularity=self.config.actor.group_size)
-        
-        # now start to unpack
         rollout_batches = []
         for agent_idx in range(self.n_agents):
             agent_batch = {}
             prefix = f"agent{agent_idx}_"
-            
             for key in list(unified_batch.keys()):
                 if key.startswith(prefix):
                     original_key = key[len(prefix):]
                     agent_batch[original_key] = unified_batch[key]
-                
             rollout_batches.append(agent_batch)
-            logger.info(f"✅ Agent {agent_idx} batch unpacked with {len(agent_batch)} fields on rank {dist.get_rank()}")
-        
+            
         dist.barrier()
         return rollout_batches
     
