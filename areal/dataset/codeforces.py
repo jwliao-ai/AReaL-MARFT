@@ -12,7 +12,9 @@ def get_codeforces_sft_dataset(
     假设数据集中包含 'solutions' (代码列表) 或 'solution' (代码字符串) 字段作为 target。
     """
     if path.endswith(".json") or path.endswith(".jsonl"):
-        dataset = load_dataset("json", data_files=path, split=split)
+        # 修复：显式指定 split 名称对应的文件，防止 load_dataset 默认归类为 'train' 导致 split='test' 时报错
+        data_files = {split: path} if split else path
+        dataset = load_dataset("json", data_files=data_files, split=split)
     else:
         dataset = load_dataset(path, split=split)
 
@@ -59,7 +61,9 @@ def get_codeforces_rl_dataset(
     保留问题 Prompt，同时保留用于 Reward Model 评测的 metadata (如 test cases)。
     """
     if path.endswith(".json") or path.endswith(".jsonl"):
-        dataset = load_dataset("json", data_files=path, split=split)
+        # 修复：显式指定 split 名称对应的文件，防止 load_dataset 默认归类为 'train' 导致 split='test' 时报错
+        data_files = {split: path} if split else path
+        dataset = load_dataset("json", data_files=data_files, split=split)
     else:
         dataset = load_dataset(path, split=split)
 
