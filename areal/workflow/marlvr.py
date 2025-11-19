@@ -136,11 +136,11 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
                 })
         return context
 
-    def _default_context_format(self, agent_id: int, agent_name: str, context: list[dict]) -> str:
-        if self.interaction_mode == "parallel":
+    def _default_context_format(self, interaction_mode, agent_id: int, agent_name: str, context: list[dict]) -> str:
+        if interaction_mode == "parallel":
             return ""
         
-        if self.interaction_mode == "sequential":
+        if interaction_mode == "sequential":
             if not context:
                 return ""
             
@@ -153,7 +153,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             lines.append(f"[END OF TEACHER'S RESPONSE]\nNow it's your turn.")
             return "\n".join(lines)
         
-        if self.interaction_mode == "communication":
+        if interaction_mode == "communication":
             logger.warning(
                 f"Agent {agent_id}: 'communication' mode not yet implemented, "
                 "falling back to sequential format"
@@ -161,7 +161,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
             return ""
         
         logger.warning(
-            f"Agent {agent_id}: Unknown interaction_mode '{self.interaction_mode}', "
+            f"Agent {agent_id}: Unknown interaction_mode '{interaction_mode}', "
             "no context will be provided"
         )
         return ""
@@ -179,7 +179,7 @@ class MultiAgentRLVRWorkflow(RLVRWorkflow):
         [Post System Prompt] -> 紧跟在 Context 之后，提醒 Agent 注意事项
         """
         # 1. 获取 Context 字符串
-        context_str = self.context_format_fn(self.agent_id, self.agent_name, context)
+        context_str = self.context_format_fn(interaction_mode=self.interaction_mode, agent_id=self.agent_id, agent_name=self.agent_name, context=context)
         
         # 2. 构建要在 User 消息末尾追加的完整内容 (Context + Post Prompt)
         parts_to_append = []
