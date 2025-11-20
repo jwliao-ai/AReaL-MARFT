@@ -233,14 +233,23 @@ class MultiAgentSystem:
                 f"Loading recovery info for agent {agent_id} "
                 f"(experiment_name={agent['config'].recover.experiment_name})..."
             )
+            
+            engines_to_load = {"actor": agent['actor']}
+            if self.share_critic:
+                if agent_id == 0:
+                    engines_to_load["critic"] = self.shared_critic
+            else:
+                engines_to_load["critic"] = agent['critic']
+            
             recover_info = agent['recover_handler'].load(
-                agent['actor'],
+                engines_to_load,
                 agent['saver'],
                 agent['evaluator'],
                 self.stats_logger,  # Use shared stats logger
                 train_dataloader,
                 inference_engine=agent['rollout'],
                 weight_update_meta=agent['weight_update_meta'],
+                inference_engine_update_from="actor",
             )
             step = (
                 recover_info.last_step_info.next().global_step
@@ -510,8 +519,15 @@ class MultiAgentSystem:
             agent_id = agent['id']
             with stats_tracker.scope(f"agent{agent_id}"):
                 with stats_tracker.record_timing(f"checkpoint_for_recover"):
+                    engines_to_dump = {"actor": agent['actor']}
+                    if self.share_critic:
+                        if agent_id == 0:
+                            engines_to_dump["critic"] = self.shared_critic
+                    else:
+                        engines_to_dump["critic"] = agent['critic']
+                    
                     agent['recover_handler'].dump(
-                        agent['actor'],
+                        engines_to_dump,
                         step_info,
                         agent['saver'],
                         agent['evaluator'],
