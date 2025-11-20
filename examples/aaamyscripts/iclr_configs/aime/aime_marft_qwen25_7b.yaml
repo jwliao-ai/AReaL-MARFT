@@ -1,0 +1,189 @@
+experiment_name: marft-aime-qwen25-7b
+trial_name: trial0
+
+# Multi-agent settings
+n_agents: 2
+agent_interaction_mode: sequential  # or parallel for MAPPO
+share_critic: true
+
+agent_profiles:
+  - agent_id: 0
+    agent_name: Teacher
+    system_prompt: "You are a distinguished Math Professor specializing in problem decomposition and heuristic strategies. Your goal is to guide a student to solve complex mathematical problems."
+    post_system_prompt: "Your task is to analyze the given problem and provide a structured 'Solution Roadmap'.\n\n**Constraints:**\n1. Break the problem down into numbered, logical sub-steps.\n2. Identify the specific theorems, formulas, or concepts required for each step.\n3. Do NOT perform the actual numerical calculations or derive the final result. Focus solely on the *methodology* and *logic*.\n4. Ensure the roadmap is clear enough for a student to follow without needing further clarification."
+  - agent_id: 1
+    agent_name: Student
+    system_prompt: "You are a diligent Math Student. You are excellent at performing precise calculations and following logical instructions, but you need guidance on the overall strategy."
+    post_system_prompt: "**Instructions:**\n1. Strictly follow the 'Solution Roadmap' provided by the Teacher step-by-step.\n2. For each step, explicitly show the setup, the calculation process, and the intermediate result.\n3. Use LaTeX formatting for all mathematical expressions (e.g., $x^2 + y^2 = z^2$).\n4. Verify your arithmetic at each step to ensure accuracy.\n5. State the final answer clearly at the end, enclosed in a box format: \\boxed{answer}."
+
+seed: 1
+total_train_epochs: 1000
+tokenizer_path: ${actor.path}
+# async_training: false
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/iclr_experiments/${experiment_name}-${trial_name}
+  name_resolve:
+    type: nfs
+    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/iclr_name_resolve/${experiment_name}-${trial_name}
+
+# all agents share resources allocation mode
+allocation_mode: d2p1t1
+
+rollout:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  max_concurrent_rollouts: 256
+  queue_size: null
+  consumer_batch_size: 128
+  max_head_offpolicyness: 4
+  enable_rollout_tracing: true
+  pause_grace_period: 1.0
+
+gconfig:
+  n_samples: 1
+  min_new_tokens: 0
+  max_new_tokens: 2048
+  greedy: false
+  temperature: 1.0
+
+# Actor/Critic as prototype, which will be copied across agents
+actor:
+  experiment_name: ${experiment_name}  # practically will be suffixed by _agent{id}
+  trial_name: ${trial_name}
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/models/Qwen2.5-7B-Instruct
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 8192
+  optimizer:
+    type: adam
+    lr: 3e-5
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: constant
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.001
+  group_size: ${gconfig.n_samples}
+  eps_clip: 0.4
+  temperature: ${gconfig.temperature}
+  reward_scaling: 10.0
+  reward_bias: -0.5
+  kl_ctl: 0.0
+  adv_norm:
+    mean_level: group
+    std_level: batch
+  ppo_n_minibatches: 1
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behav_imp_weight_cap: 5.0
+  dynamic_sampling: false
+  max_new_tokens: ${gconfig.max_new_tokens}
+  use_lora: true
+  peft_type: lora
+  lora_rank: 32
+  lora_alpha: 16
+  target_modules: [q_proj, v_proj]
+
+critic:
+  is_critic: true
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: ${actor.dtype}
+  eps_clip: 0.5
+  ppo_n_minibatches: ${actor.ppo_n_minibatches}
+  mb_spec:
+    max_tokens_per_mb: 8192
+  optimizer: ${actor.optimizer}
+
+ref:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 1024
+  optimizer: null
+
+sglang: # in fact, not used, because the sglang server is launched seperately
+  model_path: ${actor.path}
+  random_seed: ${seed}
+  skip_tokenizer_init: true
+  dtype: ${actor.dtype}
+  max_running_requests: 64
+  context_length: 32768
+  mem_fraction_static: 0.75
+  enable_lora: ${actor.use_lora}
+  max_lora_rank: ${actor.lora_rank}
+  lora_target_modules: ${actor.target_modules}
+  schedule_policy: fcfs
+
+train_dataset:
+  batch_size: 128
+  shuffle: true
+  drop_last: true
+  pin_memory: true
+  num_workers: 4
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/aime-1983-2024/train.csv
+  type: rl
+  max_length: 1024
+
+valid_dataset:
+  batch_size: 256
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/aime-1983-2024/valid.csv
+  type: rl
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled
+  tensorboard:
+    path: ${cluster.fileroot}/tensorboard_logs
+
+launcher:
+  inference_server_cpus_per_gpu: 15
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 15
+  trainer_mem_per_gpu: 32768
