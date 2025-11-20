@@ -307,13 +307,31 @@ class MultiAgentSystem:
             logger.info("Rank 0: All agents rollout finished. Preparing unified batch...")
             
             if len(agent_batches) > 0:
-                last_agent_rewards = agent_batches[-1]['rewards']
-                for agent_idx, batch in enumerate(agent_batches):
-                    batch['rewards'] = last_agent_rewards
-                    for key, value in batch.items():
-                        if not torch.is_tensor(value) and not isinstance(value, (int, float)):
-                             pass 
-                        unified_batch[f"agent{agent_idx}_{key}"] = value
+                if self.interaction_mode == "sequential":
+                    # Sequential mode: all agents use the last agent's reward
+                    last_agent_rewards = agent_batches[-1]['rewards']
+                    for agent_idx, batch in enumerate(agent_batches):
+                        batch['rewards'] = last_agent_rewards
+                        for key, value in batch.items():
+                            if not torch.is_tensor(value) and not isinstance(value, (int, float)):
+                                 pass 
+                            unified_batch[f"agent{agent_idx}_{key}"] = value
+                elif self.interaction_mode == "parallel":
+                    # Parallel mode: each agent's reward = 0.5 * own reward + 0.5 * team mean reward
+                    all_rewards = [batch['rewards'] for batch in agent_batches]
+                    team_mean_reward = torch.stack(all_rewards).mean(dim=0)
+                    
+                    for agent_idx, batch in enumerate(agent_batches):
+                        original_reward = batch['rewards']
+                        batch['rewards'] = 0.5 * original_reward + 0.5 * team_mean_reward
+                        for key, value in batch.items():
+                            if not torch.is_tensor(value) and not isinstance(value, (int, float)):
+                                 pass 
+                            unified_batch[f"agent{agent_idx}_{key}"] = value
+                    
+                    logger.info(f"Parallel mode: Applied team mean reward. Team mean: {team_mean_reward.mean().item():.4f}")
+                else:
+                    raise ValueError(f"Unknown interaction_mode: {self.interaction_mode}")
             else:
                 logger.warning("Rank 0: agent_batches is empty!")
 
