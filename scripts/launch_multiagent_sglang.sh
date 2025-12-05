@@ -13,9 +13,12 @@ MEM_FRACTION=${MEM_FRACTION:-0.9}
 # ✅ LoRA 配置（必须与训练时的配置一致）
 MAX_LORA_RANK=${MAX_LORA_RANK:-32}
 # SGLang accepts: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, qkv_proj, gate_up_proj, all
-# Use "all" to match "all-linear" behavior in training config
-# LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"all"}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"q_proj v_proj"}
+
+# 1. 获取机器名 (例如: server-node-01)
+HOSTNAME=$(hostname)
+# 获取时间戳
+TIMESTAMP=$(date "+%Y%m%d_%H%M%S")
 
 echo "============================================"
 echo "Multi-Agent SGLang Launcher"
@@ -27,6 +30,7 @@ echo "BASE_GPU_ID: ${BASE_GPU_ID}"
 echo "MEM_FRACTION: ${MEM_FRACTION}"
 echo "MAX_LORA_RANK: ${MAX_LORA_RANK}"
 echo "LORA_TARGET_MODULES: ${LORA_TARGET_MODULES}"
+echo "TIMESTAMP: ${TIMESTAMP}"
 echo "============================================"
 
 # Check if model path exists
@@ -54,7 +58,9 @@ done
 for agent_id in $(seq 0 $((N_AGENTS - 1))); do
     PORT=$((BASE_PORT + agent_id))
     GPU_ID=$((BASE_GPU_ID + agent_id))
-    LOG_FILE="${LOGS_DIR}/agent${agent_id}_port${PORT}.log"
+    
+    # ✅ 修改文件名，加入时间后缀
+    LOG_FILE="${LOGS_DIR}/${HOSTNAME}_agent${agent_id}_port${PORT}_${TIMESTAMP}.log"    
     
     echo "🚀 Starting SGLang server for Agent ${agent_id}..."
     echo "   - Port: ${PORT}"
@@ -110,7 +116,7 @@ for agent_id in $(seq 0 $((N_AGENTS - 1))); do
     echo "  Agent ${agent_id}: http://localhost:${PORT} (GPU ${GPU_ID})"
 done
 echo ""
-echo "📊 Monitor logs:"
+echo "📊 Monitor logs (using wildcard for timestamp):"
 echo "  tail -f ${LOGS_DIR}/agent*.log"
 echo ""
 echo "🔧 Test server health:"
