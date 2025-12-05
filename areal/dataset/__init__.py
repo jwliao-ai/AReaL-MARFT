@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
     from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
-# Added "math" and "codeforces" to valid datasets
+# Added "math", "codeforces", and "livecodebench" to valid datasets
 VALID_DATASETS = [
     "gsm8k", 
     "clevr_count_70k", 
@@ -19,7 +19,8 @@ VALID_DATASETS = [
     "torl_data", 
     "aime", 
     "MATH", 
-    "codeforces"
+    "codeforces",
+    "livecodebench"
 ]
 
 logger = logging.getLogger("Dataset")
@@ -89,6 +90,26 @@ def _get_custom_dataset(
         from .codeforces import get_codeforces_rl_dataset
 
         return get_codeforces_rl_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "livecodebench" in path and type == "sft":
+        from .livecodebench import get_livecodebench_sft_dataset
+
+        return get_livecodebench_sft_dataset(
+            path=path,
+            split=split,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    elif "livecodebench" in path and type == "rl":
+        from .livecodebench import get_livecodebench_rl_dataset
+
+        return get_livecodebench_rl_dataset(
             path=path,
             split=split,
             tokenizer=tokenizer,
