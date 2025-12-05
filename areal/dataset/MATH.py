@@ -7,7 +7,9 @@ def get_math_sft_dataset(
     max_length: int | None = None,
 ):
     if path.endswith(".json") or path.endswith(".jsonl"):
-        dataset = load_dataset("json", data_files=path, split=split)
+        # 修复：显式指定 split 名称对应的文件，防止 load_dataset 默认归类为 'train' 导致 split='test' 时报错
+        data_files = {split: path} if split else path
+        dataset = load_dataset("json", data_files=data_files, split=split)
     else:
         dataset = load_dataset(path, split=split)
 
@@ -37,7 +39,9 @@ def get_math_rl_dataset(
     max_length: int | None = None,
 ):
     if path.endswith(".json") or path.endswith(".jsonl"):
-        dataset = load_dataset("json", data_files=path, split=split)
+        # 修复：显式指定 split 名称对应的文件，防止 load_dataset 默认归类为 'train' 导致 split='test' 时报错
+        data_files = {split: path} if split else path
+        dataset = load_dataset("json", data_files=data_files, split=split)
     else:
         dataset = load_dataset(path, split=split)
 
