@@ -4,10 +4,6 @@ trial_name: trial0
 seed: 1
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
-<<<<<<< HEAD
-async_training: false
-=======
->>>>>>> upstream/fw/fix-rollout-batch
 
 cluster:
   n_nodes: 1
