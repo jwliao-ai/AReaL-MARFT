@@ -1,25 +1,24 @@
-experiment_name: marft-cf-qwen25-7b
+experiment_name: mappo-MATH-qwen25-7b
 trial_name: trial9
 
 # Multi-agent settings
 n_agents: 2
-agent_interaction_mode: sequential  # or parallel for MAPPO
+agent_interaction_mode: parallel  # or parallel for MAPPO
 share_critic: true
 
 # Agent-specific profiles (optional)
 agent_profiles:
   - agent_id: 0
     agent_name: Teacher
-    system_prompt: "You are a Senior Software Teacher specialized in algorithmic design and problem-solving. You need to guide a junior coding agent with limited reasoning capabilities to implement a software solution."
-    post_system_prompt: "Your task is to provide a high-level architectural plan or pseudocode strategy for the given problem step-by-step. \n\n**Constraints:**\n1. Focus on logic, data structures, and control flow.\n2. Do NOT write the full executable code or implementation details (syntax).\n3. Your output will serve as a blueprint for the low-level agent to write the actual code."
+    system_prompt: "You are a math teacher specialized in solving mathematical problems, you need to teach a weaker agent with minimal capability in math how to solve a problem step-by-step. Your task is to provide a high-level solution plan for the given problem without any detailed calculations, in order to guide a low-level math solving agent to solve the problem."
   - agent_id: 1
     agent_name: Student
-    system_prompt: "You are a Junior Student tasked with implementing a software solution."
-    post_system_prompt: "**Instructions:**\n1. Follow the high-level plan provided by the Teacher precisely.\n2. Implement the solution step-by-step, translating logic into actual code.\n3. Your solution must read input from standard input (cin), write output to standard output (cout).\nDo not include any debug prints or additional output.\n\nPut your final solution within a single code block:\n```python\n<your code here>\n```"
+    system_prompt: "You are a math student tasked with solving problems step by step. Follow the instructions provided by the Teacher precisely, showing all reasoning, calculations and intermediate results. Present the final answer within \\boxed{}."
 
 seed: 1
 total_train_epochs: 1000
 tokenizer_path: ${actor.path}
+# async_training: false
 
 cluster:
   n_nodes: 1
@@ -67,18 +66,15 @@ actor:
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
-    lr_scheduler_type: cosine
+    lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
   group_size: ${gconfig.n_samples}
-  eps_clip: 0.2
+  eps_clip: 0.4
   temperature: ${gconfig.temperature}
   reward_scaling: 10.0
   reward_bias: -0.5
   kl_ctl: 0.0
-  adv_norm:
-    mean_level: group
-    std_level: batch
   ppo_n_minibatches: 1
   recompute_logprob: true
   use_decoupled_loss: true
@@ -136,7 +132,7 @@ train_dataset:
   drop_last: true
   pin_memory: true
   num_workers: 4
-  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/codeforces/preprocessed/verifiable-prompts/chunked_train_py.json
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/MATH/train.jsonl
   type: rl
   max_length: 1024
 
@@ -145,7 +141,7 @@ valid_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 4
-  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/codeforces/preprocessed/verifiable-prompts/test_py.json
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/MATH/test.jsonl
   type: rl
 
 saver:

@@ -1,5 +1,5 @@
-experiment_name: marft-cf-qwen25-7b
-trial_name: trial9
+experiment_name: marft-cf-qwen25-14b
+trial_name: experimental
 
 # Multi-agent settings
 n_agents: 2
@@ -24,10 +24,10 @@ tokenizer_path: ${actor.path}
 cluster:
   n_nodes: 1
   n_gpus_per_node: 2
-  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/experiments/${experiment_name}-${trial_name}
+  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/experimental_experiments/${experiment_name}-${trial_name}
   name_resolve:
     type: nfs
-    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/name_resolve/${experiment_name}-${trial_name}
+    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/experimental_name_resolve/${experiment_name}-${trial_name}
 
 # all agents share resources allocation mode
 allocation_mode: d2p1t1
@@ -53,7 +53,7 @@ gconfig:
 actor:
   experiment_name: ${experiment_name}  # practically will be suffixed by _agent{id}
   trial_name: ${trial_name}
-  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/models/Qwen2.5-7B-Instruct
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/models/Qwen2.5-14B-Instruct
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
@@ -152,12 +152,12 @@ saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
+  freq_epochs: 50
   freq_steps: null
   freq_secs: null
 
 recover:
-  mode: disabled
+  mode: auto
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}

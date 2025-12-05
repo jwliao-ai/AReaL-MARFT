@@ -1,25 +1,25 @@
-experiment_name: marft-cf-qwen25-7b
-trial_name: trial9
+experiment_name: marft-MATH-qwen25-7b
+trial_name: debug-no-share-critic
 
 # Multi-agent settings
 n_agents: 2
 agent_interaction_mode: sequential  # or parallel for MAPPO
-share_critic: true
+share_critic: false
 
-# Agent-specific profiles (optional)
 agent_profiles:
   - agent_id: 0
     agent_name: Teacher
-    system_prompt: "You are a Senior Software Teacher specialized in algorithmic design and problem-solving. You need to guide a junior coding agent with limited reasoning capabilities to implement a software solution."
-    post_system_prompt: "Your task is to provide a high-level architectural plan or pseudocode strategy for the given problem step-by-step. \n\n**Constraints:**\n1. Focus on logic, data structures, and control flow.\n2. Do NOT write the full executable code or implementation details (syntax).\n3. Your output will serve as a blueprint for the low-level agent to write the actual code."
+    system_prompt: "You are a distinguished Math Professor specializing in problem decomposition and heuristic strategies. Your goal is to guide a student to solve complex mathematical problems."
+    post_system_prompt: "Your task is to analyze the given problem and provide a structured 'Solution Roadmap'.\n\n**Constraints:**\n1. Break the problem down into numbered, logical sub-steps.\n2. Identify the specific theorems, formulas, or concepts required for each step.\n3. **CRITICAL:** Do NOT perform the actual numerical calculations or derive the final result. Focus solely on the *methodology* and *logic*.\n4. Ensure the roadmap is clear enough for a student to follow without needing further clarification."
   - agent_id: 1
     agent_name: Student
-    system_prompt: "You are a Junior Student tasked with implementing a software solution."
-    post_system_prompt: "**Instructions:**\n1. Follow the high-level plan provided by the Teacher precisely.\n2. Implement the solution step-by-step, translating logic into actual code.\n3. Your solution must read input from standard input (cin), write output to standard output (cout).\nDo not include any debug prints or additional output.\n\nPut your final solution within a single code block:\n```python\n<your code here>\n```"
+    system_prompt: "You are a diligent Math Student. You are excellent at performing precise calculations and following logical instructions, but you need guidance on the overall strategy."
+    post_system_prompt: "**Instructions:**\n1. Strictly follow the 'Solution Roadmap' provided by the Teacher step-by-step.\n2. For each step, explicitly show the setup, the calculation process, and the intermediate result.\n3. Use LaTeX formatting for all mathematical expressions (e.g., $x^2 + y^2 = z^2$).\n4. Verify your arithmetic at each step to ensure accuracy.\n5. State the final answer clearly at the end, enclosed in a box format: \\boxed{answer}."
 
 seed: 1
 total_train_epochs: 1000
 tokenizer_path: ${actor.path}
+# async_training: false
 
 cluster:
   n_nodes: 1
@@ -67,18 +67,15 @@ actor:
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
-    lr_scheduler_type: cosine
+    lr_scheduler_type: constant
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
   group_size: ${gconfig.n_samples}
-  eps_clip: 0.2
+  eps_clip: 0.4
   temperature: ${gconfig.temperature}
   reward_scaling: 10.0
   reward_bias: -0.5
   kl_ctl: 0.0
-  adv_norm:
-    mean_level: group
-    std_level: batch
   ppo_n_minibatches: 1
   recompute_logprob: true
   use_decoupled_loss: true
@@ -136,7 +133,7 @@ train_dataset:
   drop_last: true
   pin_memory: true
   num_workers: 4
-  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/codeforces/preprocessed/verifiable-prompts/chunked_train_py.json
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/MATH/train.jsonl
   type: rl
   max_length: 1024
 
@@ -145,7 +142,7 @@ valid_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 4
-  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/codeforces/preprocessed/verifiable-prompts/test_py.json
+  path: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/data/MATH/test.jsonl
   type: rl
 
 saver:

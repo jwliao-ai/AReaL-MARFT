@@ -24,10 +24,10 @@ tokenizer_path: ${actor.path}
 cluster:
   n_nodes: 1
   n_gpus_per_node: 2
-  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/iclr_experiments/${experiment_name}-${trial_name}
+  fileroot: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/re_iclr_experiments/${experiment_name}-${trial_name}
   name_resolve:
     type: nfs
-    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/iclr_name_resolve/${experiment_name}-${trial_name}
+    nfs_record_root: /inspire/hdd/project/multi-agent/liaojunwei-p-liaojunwei/codes/iclr/AReaL-MARFT/re_iclr_name_resolve/${experiment_name}-${trial_name}
 
 # all agents share resources allocation mode
 allocation_mode: d2p1t1
@@ -67,11 +67,11 @@ actor:
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
-    lr_scheduler_type: constant
+    lr_scheduler_type: cosine
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
   group_size: ${gconfig.n_samples}
-  eps_clip: 0.4
+  eps_clip: 0.2
   temperature: ${gconfig.temperature}
   reward_scaling: 10.0
   reward_bias: -0.5
@@ -152,12 +152,12 @@ saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
-  freq_epochs: 1
+  freq_epochs: 50
   freq_steps: null
   freq_secs: null
 
 recover:
-  mode: disabled
+  mode: auto
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
